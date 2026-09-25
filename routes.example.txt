@@ -1,0 +1,7 @@
+# METHOD  HOST_PREFIX  PATH
+GET       api.         /users/{id}
+POST      api.         /users
+GET       -            /users/{id}/posts/{pid}
+GET       -            /files/*/meta
+GET       -            /static/**
+-         -            /healthz
