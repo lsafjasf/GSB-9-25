@@ -1,0 +1,53 @@
+
+=== 高重复（状态/类型/地区，10万行） ===
+rows=100000 cols=3  naive=2,189,681B  dictcodec=300,122B  ratio=0.137
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0  dict   100000         5         37       640739       740739       100037    0.135
+      1  dict   100000         4         22       449297       549297       100022    0.182
+      2  dict   100000         5         45       799641       899641       100045    0.111
+
+=== 几乎全不同（UUID 主键，10万行） ===
+rows=100000 cols=1  naive=2,900,004B  dictcodec=2,900,010B  ratio=1.000
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0   raw   100000    100000          0      2800000      2900000      2900000    1.000
+
+=== 混合分布（10万行） ===
+rows=100000 cols=3  naive=4,039,041B  dictcodec=2,718,942B  ratio=0.673
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0  dict   100000         4         22       450135       550135       100022    0.182
+      1  dict   100000     10001     118903      1088902      1188902       318903    0.268
+      2   raw   100000    100000          0      2200000      2300000      2300000    1.000
+
+=== 单值列（10万行） ===
+rows=100000 cols=1  naive=700,004B  dictcodec=100,019B  ratio=0.143
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0  dict   100000         1          7       600000       700000       100007    0.143
+
+=== 空字符串为主（10万行） ===
+rows=100000 cols=2  naive=399,021B  dictcodec=200,030B  ratio=0.501
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0  dict   100000         3         17       199017       299017       100017    0.334
+      1   raw   100000         1          0            0       100000       100000    1.000
+
+=== 超长取值 2KB×20 循环（1万行） ===
+rows=10000 cols=1  naive=20,500,003B  dictcodec=51,011B  ratio=0.002
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0  dict    10000        20      41000     20480000     20500000        51000    0.002
+
+=== 列数极多（2000 列 × 50 行） ===
+rows=50 cols=2000  naive=200,003B  dictcodec=118,008B  ratio=0.590
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+      0  dict       50         3          6           50          100           56    0.560
+      1  dict       50         3          6           50          100           56    0.560
+      2  dict       50         3          6           50          100           56    0.560
+      3  dict       50         3          6           50          100           56    0.560
+      4  dict       50         3          6           50          100           56    0.560
+  ... 省略 1994 列 ...
+  [汇总] dict 列 2000 个，raw 列 0 个
+
+=== 空表（0 行） ===
+rows=0 cols=0  naive=2B  dictcodec=7B  ratio=3.500
+    col  mode     rows  distinct     dict_B       orig_B        raw_B        enc_B  enc/raw
+
+=== 合计 ===
+naive=30,927,759B  dictcodec=6,388,149B  ratio=0.207
