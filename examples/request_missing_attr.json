@@ -1,0 +1,6 @@
+{
+  "subject": {"id": "alice", "role": "employee", "department": "eng", "clearance": 2, "status": "active"},
+  "resource": {"id": "doc-1", "department": "eng", "classification": "internal"},
+  "action": "write",
+  "env": {"hour": 10}
+}

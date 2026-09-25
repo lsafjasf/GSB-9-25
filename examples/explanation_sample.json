@@ -1,0 +1,51 @@
+{
+  "decision": "deny",
+  "decided_by": "deny-terminated-employee",
+  "matched": [
+    {
+      "id": "allow-admin-anything",
+      "effect": "allow",
+      "priority": 80
+    },
+    {
+      "id": "allow-dept-read",
+      "effect": "allow",
+      "priority": 40
+    },
+    {
+      "id": "deny-terminated-employee",
+      "effect": "deny",
+      "priority": 80
+    }
+  ],
+  "not_matched": [
+    {
+      "id": "deny-low-clearance",
+      "reason": "subject.clearance: expected lt 3, got 5"
+    }
+  ],
+  "errored": [],
+  "shadowed": [
+    {
+      "id": "allow-admin-anything",
+      "effect": "allow",
+      "priority": 80,
+      "shadowed_by": "deny-terminated-employee",
+      "reason": "same priority 80 as deciding rule 'deny-terminated-employee'; deny-overrides makes deny win"
+    },
+    {
+      "id": "allow-dept-read",
+      "effect": "allow",
+      "priority": 40,
+      "shadowed_by": "deny-terminated-employee",
+      "reason": "lower priority (40 < 80) than deciding rule 'deny-terminated-employee'"
+    }
+  ],
+  "tie_break": "deny-overrides",
+  "default_policy_applied": null,
+  "stats": {
+    "rules_total": 6,
+    "candidates": 4,
+    "evaluated": 4
+  }
+}

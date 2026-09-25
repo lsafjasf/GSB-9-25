@@ -1,0 +1,6 @@
+{
+  "subject": {"id": "mallory", "role": "admin", "department": "eng", "clearance": 5, "status": "terminated"},
+  "resource": {"id": "doc-9", "owner": "alice", "department": "eng", "classification": "public"},
+  "action": "read",
+  "env": {"hour": 10}
+}

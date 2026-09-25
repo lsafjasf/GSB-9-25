@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "id": "allow-eng-read",
+      "effect": "allow",
+      "priority": 10,
+      "when": {"action": "read", "subject": {"department": "eng"}}
+    },
+    {
+      "id": "deny-eng-read",
+      "effect": "deny",
+      "priority": 10,
+      "when": {"action": "read", "subject": {"department": "eng"}}
+    }
+  ]
+}

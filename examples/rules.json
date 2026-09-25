@@ -1,0 +1,63 @@
+{
+  "config": {
+    "on_attribute_error": "error",
+    "default_effect": "deny"
+  },
+  "rules": [
+    {
+      "id": "deny-confidential-outside-hours",
+      "effect": "deny",
+      "priority": 100,
+      "when": {
+        "action": {"in": ["read", "write"]},
+        "resource": {"classification": {"eq": "confidential"}},
+        "env": {"hour": {"not_in": [9, 10, 11, 12, 13, 14, 15, 16, 17]}}
+      }
+    },
+    {
+      "id": "deny-low-clearance",
+      "effect": "deny",
+      "priority": 90,
+      "when": {
+        "action": {"eq": "read"},
+        "resource": {"classification": {"eq": "confidential"}},
+        "subject": {"clearance": {"lt": 3}}
+      }
+    },
+    {
+      "id": "allow-owner-write",
+      "effect": "allow",
+      "priority": 50,
+      "when": {
+        "action": {"eq": "write"},
+        "resource": {"owner": {"eq": "$subject.id"}}
+      }
+    },
+    {
+      "id": "allow-dept-read",
+      "effect": "allow",
+      "priority": 40,
+      "when": {
+        "action": {"eq": "read"},
+        "subject": {"department": {"eq": "$resource.department"}},
+        "resource": {"classification": {"in": ["internal", "public"]}}
+      }
+    },
+    {
+      "id": "allow-admin-anything",
+      "effect": "allow",
+      "priority": 80,
+      "when": {
+        "subject": {"role": {"eq": "admin"}}
+      }
+    },
+    {
+      "id": "deny-terminated-employee",
+      "effect": "deny",
+      "priority": 80,
+      "when": {
+        "subject": {"status": {"eq": "terminated"}}
+      }
+    }
+  ]
+}
