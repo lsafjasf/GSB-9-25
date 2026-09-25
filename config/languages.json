@@ -1,0 +1,49 @@
+{
+  "locales": {
+    "en": {
+      "fallback": [],
+      "number": {"thousands_sep": ",", "decimal_sep": ".", "decimal_places": null},
+      "date": {"order": "MDY", "separator": "/", "pad": true},
+      "plural": {
+        "categories": [
+          {"name": "one", "when": "n = 1"},
+          {"name": "other", "when": null}
+        ]
+      }
+    },
+    "fr": {
+      "fallback": ["en"],
+      "number": {"thousands_sep": " ", "decimal_sep": ",", "decimal_places": null},
+      "date": {"order": "DMY", "separator": "/", "pad": true},
+      "plural": {
+        "categories": [
+          {"name": "one", "when": "n = 0 or n = 1"},
+          {"name": "other", "when": null}
+        ]
+      }
+    },
+    "ru": {
+      "fallback": ["en"],
+      "number": {"thousands_sep": " ", "decimal_sep": ",", "decimal_places": null},
+      "date": {"order": "DMY", "separator": ".", "pad": true},
+      "plural": {
+        "categories": [
+          {"name": "one", "when": "n % 10 = 1 and n % 100 != 11"},
+          {"name": "few", "when": "n % 10 in 2..4 and not (n % 100 in 12..14)"},
+          {"name": "many", "when": "n % 10 = 0 or n % 10 in 5..9 or n % 100 in 11..14"},
+          {"name": "other", "when": null}
+        ]
+      }
+    },
+    "ja": {
+      "fallback": ["en"],
+      "number": {"thousands_sep": ",", "decimal_sep": ".", "decimal_places": null},
+      "date": {"order": "YMD", "separator": "/", "pad": true},
+      "plural": {
+        "categories": [
+          {"name": "other", "when": null}
+        ]
+      }
+    }
+  }
+}

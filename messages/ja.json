@@ -1,0 +1,4 @@
+{
+  "files.selected": "{count, plural, other {# 件のファイルを選択しました}}",
+  "cart.summary": "{user} さん：{due, date} までに合計 {total, number}、{count, plural, other {# 点}} の商品があります。"
+}

@@ -1,0 +1,6 @@
+{
+  "files.selected": "{count, plural, one {# file selected} other {# files selected}}",
+  "cart.summary": "Hi {user}, you have {count, plural, one {# item} other {# items}} totaling {total, number}, due on {due, date}.",
+  "diag.demo": "User {user} has {count} of {total} ({count} again)",
+  "fallback.demo": "This message exists only in English, {user}."
+}

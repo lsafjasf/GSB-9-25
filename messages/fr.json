@@ -1,0 +1,4 @@
+{
+  "files.selected": "{count, plural, one {# fichier sélectionné} other {# fichiers sélectionnés}}",
+  "cart.summary": "Bonjour {user}, {count, plural, one {# article} other {# articles}} pour un total de {total, number}, à payer avant le {due, date}."
+}
