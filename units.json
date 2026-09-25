@@ -1,0 +1,44 @@
+{
+  "dimensions": ["L", "M", "T", "I", "Theta", "N", "J"],
+  "prefixes": {
+    "Y": "1e24",  "Z": "1e21",  "E": "1e18",  "P": "1e15",  "T": "1e12",
+    "G": "1e9",   "M": "1e6",   "k": "1e3",   "h": "1e2",   "da": "1e1",
+    "d": "1e-1",  "c": "1e-2",  "m": "1e-3",  "u": "1e-6",  "n": "1e-9",
+    "p": "1e-12", "f": "1e-15", "a": "1e-18", "z": "1e-21", "y": "1e-24"
+  },
+  "units": {
+    "m":   {"dim": "L",     "factor": "1"},
+    "g":   {"dim": "M",     "factor": "0.001"},
+    "s":   {"dim": "T",     "factor": "1"},
+    "A":   {"dim": "I",     "factor": "1"},
+    "K":   {"dim": "Theta", "factor": "1"},
+    "mol": {"dim": "N",     "factor": "1"},
+    "cd":  {"dim": "J",     "factor": "1"},
+
+    "min": {"define": "60*s"},
+    "h":   {"define": "3600*s"},
+    "d":   {"define": "86400*s"},
+    "Hz":  {"define": "1/s"},
+    "L":   {"define": "0.001*m^3"},
+    "ha":  {"define": "10000*m^2"},
+    "t":   {"define": "1000*kg"},
+    "N":   {"define": "kg*m/s^2"},
+    "Pa":  {"define": "N/m^2"},
+    "bar": {"define": "100000*Pa"},
+    "J":   {"define": "N*m"},
+    "W":   {"define": "J/s"},
+    "Wh":  {"define": "W*h"},
+    "C":   {"define": "A*s"},
+    "V":   {"define": "W/A"},
+    "eV":  {"define": "1.602176634e-19*J"},
+
+    "in":  {"define": "0.0254*m"},
+    "ft":  {"define": "0.3048*m"},
+    "lb":  {"define": "0.45359237*kg"},
+    "lbf": {"define": "4.4482216152605*N"},
+
+    "rad": {"dim": "", "factor": "1"},
+    "%":   {"dim": "", "factor": "0.01"},
+    "ppm": {"dim": "", "factor": "1e-6"}
+  }
+}
