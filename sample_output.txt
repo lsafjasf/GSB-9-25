@@ -1,0 +1,41 @@
+total lines      : 20
+templates        : 10
+coverage         : 90.00% (18/20)
+avg placeholders : 2.83
+unclustered lines: 2
+
+== templates (by count) ==
+[     3] <DATETIME> ERROR db query failed after <DURATION> host=db-<NUM> retries=<NUM>
+         placeholders: DATETIME, DURATION, NUM, NUM
+         example     : 2026-09-25 10:00:05 ERROR db query failed after 3.5s host=db-01 retries=3
+[     3] <DATETIME> INFO http <IP> "GET <PATH>" <NUM> <DURATION>
+         placeholders: DATETIME, IP, PATH, NUM, DURATION
+         example     : 2026-09-25T10:00:01Z INFO http 10.0.0.1:8080 "GET /api/users/123" 200 12ms
+[     2] alloc at <HEX> size=<NUM>
+         placeholders: HEX, NUM
+         example     : alloc at 0x7f9c4a20 size=4096
+[     2] deploy version <VER> to <PATH>
+         placeholders: VER, PATH
+         example     : deploy version v1.2.3 to /opt/app/releases/v1.2.3
+[     2] healthcheck ok
+         placeholders: -
+         example     : healthcheck ok
+[     2] job <UUID> finished in <DURATION> exit=<NUM>
+         placeholders: UUID, DURATION, NUM
+         example     : job 6f1c2a4e-9b3d-4e5f-8a7b-1c2d3e4f5a6b finished in 250ms exit=0
+[     1] <DATETIME> WARN http <IP> "POST <PATH>" <NUM> <DURATION>
+         placeholders: DATETIME, IP, PATH, NUM, DURATION
+         example     : 2026-09-25T10:00:03Z WARN http 172.16.0.9:8080 "POST /api/orders" 502 1300ms
+[     1] action=login ip=<IP> status=ok user=bob
+         placeholders: IP
+         example     : action=login ip=10.1.1.2 status=ok user=bob
+[     1] parse error at "{"a": "b", "n": <NUM>}" in <PATH> code=<NUM>
+         placeholders: NUM, PATH, NUM
+         example     : parse error at "{"a": "b", "n": 7}" in /etc/app/conf.json code=500
+[     1] user=alice action=login ip=<IP> status=ok
+         placeholders: IP
+         example     : user=alice action=login ip=10.1.1.1 status=ok
+
+== unclustered lines ==
+[     1] 12345
+[     1] 404 500

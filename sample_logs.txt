@@ -1,0 +1,20 @@
+2026-09-25T10:00:01Z INFO http 10.0.0.1:8080 "GET /api/users/123" 200 12ms
+2026-09-25T10:00:02Z INFO http 10.0.0.2:8080 "GET /api/users/456" 200 9ms
+2026-09-25T10:00:03Z WARN http 172.16.0.9:8080 "POST /api/orders" 502 1300ms
+2026-09-25T10:00:04Z INFO http 10.0.0.1:8080 "GET /api/users/123" 200 11ms
+2026-09-25 10:00:05 ERROR db query failed after 3.5s host=db-01 retries=3
+2026-09-25 10:00:06 ERROR db query failed after 0.8s host=db-02 retries=5
+2026-09-25 10:00:07 ERROR db query failed after 1.1s host=db-01 retries=2
+job 6f1c2a4e-9b3d-4e5f-8a7b-1c2d3e4f5a6b finished in 250ms exit=0
+job 11111111-2222-3333-4444-555555555555 finished in 1.2s exit=1
+alloc at 0x7f9c4a20 size=4096
+alloc at 0x1b2c3d4e size=8192
+deploy version v1.2.3 to /opt/app/releases/v1.2.3
+deploy version 2.10.0 to /opt/app/releases/2.10.0
+user=alice action=login ip=10.1.1.1 status=ok
+action=login ip=10.1.1.2 status=ok user=bob
+parse error at "{"a": "b", "n": 7}" in /etc/app/conf.json code=500
+404 500
+12345
+healthcheck ok
+healthcheck ok
