@@ -1,0 +1,253 @@
+{
+  "python": "3.12.3",
+  "platform": "Linux-6.18.33.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "n": 1000000,
+  "rows": [
+    {
+      "distribution": "timestamps 时间戳(间隔恒定)",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 5000008,
+        "DELTA": 1000012,
+        "RLE": 6000008,
+        "COMBO": 1000558
+      },
+      "raw_vs_fixed64": 0.625,
+      "auto_winner": "DELTA",
+      "combo_worse_than_raw": false,
+      "features": {
+        "runs": 1000000,
+        "longest_run": 1,
+        "distinct": 1000000,
+        "max_abs_delta": 20,
+        "small_delta_ratio": 1.0
+      },
+      "choice": "n=1000000；游程数=1000000（最长游程=1，不同值=1000000） 差分：最大|Δ|=20，单字节差(|Δ|≤63)占比=1.00 四模式真实体积(含5B帧头) RAW=5000008 DELTA=1000012 RLE=6000008 COMBO=1000558 选 DELTA：差分集中在小值，varint 变短；且游程不多。"
+    },
+    {
+      "distribution": "smooth_walk 平稳小抖动",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 3000008,
+        "DELTA": 1000010,
+        "RLE": 3426492,
+        "COMBO": 1714716
+      },
+      "raw_vs_fixed64": 0.375,
+      "auto_winner": "DELTA",
+      "combo_worse_than_raw": false,
+      "features": {
+        "runs": 856621,
+        "longest_run": 10,
+        "distinct": 856621,
+        "max_abs_delta": 3,
+        "small_delta_ratio": 1.0
+      },
+      "choice": "n=1000000；游程数=856621（最长游程=10，不同值=856621） 差分：最大|Δ|=3，单字节差(|Δ|≤63)占比=1.00 四模式真实体积(含5B帧头) RAW=3000008 DELTA=1000010 RLE=3426492 COMBO=1714716 选 DELTA：差分集中在小值，varint 变短；且游程不多。"
+    },
+    {
+      "distribution": "piecewise_linear 分段线性",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 5000008,
+        "DELTA": 1235976,
+        "RLE": 6000008,
+        "COMBO": 215
+      },
+      "raw_vs_fixed64": 0.625,
+      "auto_winner": "COMBO",
+      "combo_worse_than_raw": false,
+      "features": {
+        "runs": 1000000,
+        "longest_run": 1,
+        "distinct": 1000000,
+        "max_abs_delta": 100,
+        "small_delta_ratio": 0.764
+      },
+      "choice": "n=1000000；游程数=1000000（最长游程=1，不同值=1000000） 差分：最大|Δ|=100，单字节差(|Δ|≤63)占比=0.76 四模式真实体积(含5B帧头) RAW=5000008 DELTA=1235976 RLE=6000008 COMBO=215 选 COMBO：差分后出现大量相同差分值（平稳/线性段多），RLE 再折叠最省。"
+    },
+    {
+      "distribution": "constant 全相同",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 1000008,
+        "DELTA": 1000008,
+        "RLE": 10,
+        "COMBO": 12
+      },
+      "raw_vs_fixed64": 0.125,
+      "auto_winner": "RLE",
+      "combo_worse_than_raw": false,
+      "features": {
+        "runs": 1,
+        "longest_run": 1000000,
+        "distinct": 1,
+        "max_abs_delta": 0,
+        "small_delta_ratio": 1.0
+      },
+      "choice": "n=1000000；游程数=1（最长游程=1000000，不同值=1） 差分：最大|Δ|=0，单字节差(|Δ|≤63)占比=1.00 四模式真实体积(含5B帧头) RAW=1000008 DELTA=1000008 RLE=10 COMBO=12 选 RLE：长游程多，重复值折叠为 (值,计数) 后最省。"
+    },
+    {
+      "distribution": "runs 块状长游程",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 1000008,
+        "DELTA": 1000500,
+        "RLE": 10226,
+        "COMBO": 17919
+      },
+      "raw_vs_fixed64": 0.125,
+      "auto_winner": "RLE",
+      "combo_worse_than_raw": false,
+      "features": {
+        "runs": 3605,
+        "longest_run": 986,
+        "distinct": 3605,
+        "max_abs_delta": 100,
+        "small_delta_ratio": 0.9995
+      },
+      "choice": "n=1000000；游程数=3605（最长游程=986，不同值=3605） 差分：最大|Δ|=100，单字节差(|Δ|≤63)占比=1.00 四模式真实体积(含5B帧头) RAW=1000008 DELTA=1000500 RLE=10226 COMBO=17919 选 RLE：长游程多，重复值折叠为 (值,计数) 后最省。"
+    },
+    {
+      "distribution": "alternating 二值交替",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 3000008,
+        "DELTA": 4000007,
+        "RLE": 4000008,
+        "COMBO": 5000007
+      },
+      "raw_vs_fixed64": 0.375,
+      "auto_winner": "RAW",
+      "combo_worse_than_raw": true,
+      "features": {
+        "runs": 1000000,
+        "longest_run": 1,
+        "distinct": 1000000,
+        "max_abs_delta": 1290247,
+        "small_delta_ratio": 0.0
+      },
+      "choice": "n=1000000；游程数=1000000（最长游程=1，不同值=1000000） 差分：最大|Δ|=1290247，单字节差(|Δ|≤63)占比=0.00 四模式真实体积(含5B帧头) RAW=3000008 DELTA=4000007 RLE=4000008 COMBO=5000007 选 RAW：没有任何变换能小于原样（或并列优先原样）。 劣化保护：COMBO=5000007 ≥ RAW=3000008，组合模式在该分布下不划算，自动模式将回退为 RAW，解压端按帧头模式字节直接识别。"
+    },
+    {
+      "distribution": "distinct_arith 全不同(等差大间隔)",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 4112914,
+        "DELTA": 3313842,
+        "RLE": 5112914,
+        "COMBO": 3980605
+      },
+      "raw_vs_fixed64": 0.5141,
+      "auto_winner": "DELTA",
+      "combo_worse_than_raw": false,
+      "features": {
+        "runs": 1000000,
+        "longest_run": 1,
+        "distinct": 1000000,
+        "max_abs_delta": 113999071,
+        "small_delta_ratio": 0.0
+      },
+      "choice": "n=1000000；游程数=1000000（最长游程=1，不同值=1000000） 差分：最大|Δ|=113999071，单字节差(|Δ|≤63)占比=0.00 四模式真实体积(含5B帧头) RAW=4112914 DELTA=3313842 RLE=5112914 COMBO=3980605 选 DELTA：差分集中在小值，varint 变短；且游程不多。"
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 4864567,
+        "DELTA": 4869917,
+        "RLE": 5864567,
+        "COMBO": 5869917
+      },
+      "raw_vs_fixed64": 0.6081,
+      "auto_winner": "RAW",
+      "combo_worse_than_raw": true,
+      "features": {
+        "runs": 1000000,
+        "longest_run": 1,
+        "distinct": 1000000,
+        "max_abs_delta": 1995132610,
+        "small_delta_ratio": 0.0
+      },
+      "choice": "n=1000000；游程数=1000000（最长游程=1，不同值=1000000） 差分：最大|Δ|=1995132610，单字节差(|Δ|≤63)占比=0.00 四模式真实体积(含5B帧头) RAW=4864567 DELTA=4869917 RLE=5864567 COMBO=5869917 选 RAW：没有任何变换能小于原样（或并列优先原样）。 劣化保护：COMBO=5869917 ≥ RAW=4864567，组合模式在该分布下不划算，自动模式将回退为 RAW，解压端按帧头模式字节直接识别。"
+    },
+    {
+      "distribution": "random_small 随机小值[-64,63]",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 1000008,
+        "DELTA": 1250214,
+        "RLE": 1984002,
+        "COMBO": 2242364
+      },
+      "raw_vs_fixed64": 0.125,
+      "auto_winner": "RAW",
+      "combo_worse_than_raw": true,
+      "features": {
+        "runs": 991997,
+        "longest_run": 4,
+        "distinct": 991997,
+        "max_abs_delta": 127,
+        "small_delta_ratio": 0.746
+      },
+      "choice": "n=1000000；游程数=991997（最长游程=4，不同值=991997） 差分：最大|Δ|=127，单字节差(|Δ|≤63)占比=0.75 四模式真实体积(含5B帧头) RAW=1000008 DELTA=1250214 RLE=1984002 COMBO=2242364 选 RAW：没有任何变换能小于原样（或并列优先原样）。 劣化保护：COMBO=2242364 ≥ RAW=1000008，组合模式在该分布下不划算，自动模式将回退为 RAW，解压端按帧头模式字节直接识别。"
+    },
+    {
+      "distribution": "random64 64位全范围随机",
+      "n": 1000000,
+      "fixed64_bytes": 8000000,
+      "sizes": {
+        "RAW": 9495768,
+        "DELTA": 9558398,
+        "RLE": 10495768,
+        "COMBO": 10558398
+      },
+      "raw_vs_fixed64": 1.187,
+      "auto_winner": "RAW",
+      "combo_worse_than_raw": true,
+      "features": {
+        "runs": 1000000,
+        "longest_run": 1,
+        "distinct": 1000000,
+        "max_abs_delta": 18435190791622713684,
+        "small_delta_ratio": 0.0
+      },
+      "choice": "n=1000000；游程数=1000000（最长游程=1，不同值=1000000） 差分：最大|Δ|=18435190791622713684，单字节差(|Δ|≤63)占比=0.00 四模式真实体积(含5B帧头) RAW=9495768 DELTA=9558398 RLE=10495768 COMBO=10558398 选 RAW：没有任何变换能小于原样（或并列优先原样）。 劣化保护：COMBO=10558398 ≥ RAW=9495768，组合模式在该分布下不划算，自动模式将回退为 RAW，解压端按帧头模式字节直接识别。"
+    }
+  ],
+  "timings": [
+    {
+      "distribution": "timestamps",
+      "winner": "DELTA",
+      "encode_s": 0.612,
+      "decode_s": 0.164
+    },
+    {
+      "distribution": "smooth_walk",
+      "winner": "DELTA",
+      "encode_s": 0.645,
+      "decode_s": 0.159
+    },
+    {
+      "distribution": "shock",
+      "winner": "RAW",
+      "encode_s": 0.923,
+      "decode_s": 0.422
+    },
+    {
+      "distribution": "random64",
+      "winner": "RAW",
+      "encode_s": 1.153,
+      "decode_s": 0.754
+    }
+  ]
+}
