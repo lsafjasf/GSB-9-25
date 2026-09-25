@@ -1,0 +1,71 @@
+{
+  "decision": "deny",
+  "deciding_rule": "r-tie-deny",
+  "reason": "rule 'r-tie-deny' won over 3 shadowed rule(s)",
+  "explanation": {
+    "tie_break": "deny-overrides: same-priority ties resolve to deny (fail-closed), then to the lexicographically smaller rule id, so a decision never depends on file ordering",
+    "policies": {
+      "on_missing_attribute": "skip",
+      "default_effect": "deny"
+    },
+    "total_rules": 6,
+    "candidate_rules": 6,
+    "pruned_by_index": 0,
+    "matched_rules": [
+      {
+        "id": "r-tie-deny",
+        "effect": "deny",
+        "priority": 50
+      },
+      {
+        "id": "r-tie-allow",
+        "effect": "allow",
+        "priority": 50
+      },
+      {
+        "id": "r-team-read",
+        "effect": "allow",
+        "priority": 40
+      },
+      {
+        "id": "r-business-hours",
+        "effect": "allow",
+        "priority": 30
+      }
+    ],
+    "unmatched_rules": [
+      {
+        "id": "r-admin-full",
+        "reason": "conditions not satisfied"
+      },
+      {
+        "id": "r-deny-classified",
+        "reason": "conditions not satisfied"
+      }
+    ],
+    "deciding_rule": "r-tie-deny",
+    "shadowed_rules": [
+      {
+        "id": "r-tie-allow",
+        "effect": "allow",
+        "priority": 50,
+        "shadowed_by": "r-tie-deny",
+        "cause": "same priority as r-tie-deny; deny-overrides tie-break"
+      },
+      {
+        "id": "r-team-read",
+        "effect": "allow",
+        "priority": 40,
+        "shadowed_by": "r-tie-deny",
+        "cause": "lower priority than r-tie-deny"
+      },
+      {
+        "id": "r-business-hours",
+        "effect": "allow",
+        "priority": 30,
+        "shadowed_by": "r-tie-deny",
+        "cause": "lower priority than r-tie-deny"
+      }
+    ]
+  }
+}

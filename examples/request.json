@@ -1,0 +1,6 @@
+{
+  "subject": {"role": "auditor", "dept": "eng", "clearance": 5},
+  "resource": {"type": "document", "classification": 2, "owner": "alice"},
+  "action": "read",
+  "environment": {"hour": 10}
+}

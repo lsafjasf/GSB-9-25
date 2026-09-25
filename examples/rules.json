@@ -1,0 +1,115 @@
+[
+  {
+    "id": "r-admin-full",
+    "effect": "allow",
+    "priority": 100,
+    "conditions": {
+      "subject": {
+        "role": "admin"
+      },
+      "resource": {
+        "type": "document"
+      },
+      "action": [
+        "read",
+        "write",
+        "delete"
+      ]
+    }
+  },
+  {
+    "id": "r-deny-classified",
+    "effect": "deny",
+    "priority": 90,
+    "conditions": {
+      "resource": {
+        "type": "document",
+        "classification": {
+          "op": "ge",
+          "value": 4
+        }
+      },
+      "action": [
+        "read",
+        "write"
+      ]
+    }
+  },
+  {
+    "id": "r-tie-deny",
+    "effect": "deny",
+    "priority": 50,
+    "conditions": {
+      "subject": {
+        "role": "auditor",
+        "clearance": {
+          "op": "le",
+          "value": 5
+        }
+      },
+      "resource": {
+        "type": "document"
+      },
+      "action": "read"
+    }
+  },
+  {
+    "id": "r-tie-allow",
+    "effect": "allow",
+    "priority": 50,
+    "conditions": {
+      "subject": {
+        "role": "auditor"
+      },
+      "resource": {
+        "type": "document"
+      },
+      "action": "read"
+    }
+  },
+  {
+    "id": "r-team-read",
+    "effect": "allow",
+    "priority": 40,
+    "conditions": {
+      "subject": {
+        "dept": [
+          "eng",
+          "ops"
+        ],
+        "clearance": {
+          "op": "ge",
+          "value": 2
+        }
+      },
+      "resource": {
+        "type": "document",
+        "classification": {
+          "op": "le",
+          "value": 2
+        }
+      },
+      "action": "read"
+    }
+  },
+  {
+    "id": "r-business-hours",
+    "effect": "allow",
+    "priority": 30,
+    "conditions": {
+      "resource": {
+        "type": "document"
+      },
+      "action": "read",
+      "environment": {
+        "hour": {
+          "op": "between",
+          "value": [
+            9,
+            18
+          ]
+        }
+      }
+    }
+  }
+]

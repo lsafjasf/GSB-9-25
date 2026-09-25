@@ -1,0 +1,22 @@
+[
+  {
+    "id": "c-allow",
+    "effect": "allow",
+    "priority": 10,
+    "conditions": {
+      "subject": {"role": "intern"},
+      "resource": {"type": "document"},
+      "action": "read"
+    }
+  },
+  {
+    "id": "c-deny",
+    "effect": "deny",
+    "priority": 20,
+    "conditions": {
+      "action": "read",
+      "resource": {"type": "document"},
+      "subject": {"role": "intern"}
+    }
+  }
+]
