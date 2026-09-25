@@ -1,0 +1,30 @@
+{
+  "comment": "优先级数值越大越先应用；同优先级按最长匹配、起始位置、声明顺序消解。",
+  "rules": [
+    {
+      "name": "email",
+      "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+      "priority": 100,
+      "case_insensitive": true,
+      "replacement": {"type": "pseudonym", "prefix": "MAIL_", "token_length": 10}
+    },
+    {
+      "name": "cn_id_card",
+      "pattern": "(?<![0-9])[0-9]{17}[0-9Xx](?![0-9])",
+      "priority": 95,
+      "replacement": {"type": "pseudonym", "prefix": "ID_", "token_length": 12}
+    },
+    {
+      "name": "cn_mobile",
+      "pattern": "(?<![0-9])1[3-9][0-9]{9}(?![0-9])",
+      "priority": 90,
+      "replacement": {"type": "mask", "value": "[PHONE]"}
+    },
+    {
+      "name": "long_digit_run",
+      "pattern": "[0-9]{6,}",
+      "priority": 10,
+      "replacement": {"type": "mask", "value": "[NUM]"}
+    }
+  ]
+}

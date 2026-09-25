@@ -1,0 +1,125 @@
+{
+  "rules": [
+    {
+      "name": "email",
+      "priority": 100,
+      "replacements": 2,
+      "spans": [
+        {
+          "start": 23,
+          "end": 46,
+          "matched": "13800138000@example.com",
+          "replacement": "MAIL_6d01fff5f4"
+        },
+        {
+          "start": 78,
+          "end": 101,
+          "matched": "13800138000@example.com",
+          "replacement": "MAIL_6d01fff5f4"
+        }
+      ]
+    },
+    {
+      "name": "cn_id_card",
+      "priority": 95,
+      "replacements": 1,
+      "spans": [
+        {
+          "start": 42,
+          "end": 60,
+          "matched": "11010119900307771X",
+          "replacement": "ID_1f3dbbe1aa3b"
+        }
+      ]
+    },
+    {
+      "name": "cn_mobile",
+      "priority": 90,
+      "replacements": 2,
+      "spans": [
+        {
+          "start": 8,
+          "end": 19,
+          "matched": "13800138000",
+          "replacement": "[PHONE]"
+        },
+        {
+          "start": 122,
+          "end": 133,
+          "matched": "13912345678",
+          "replacement": "[PHONE]"
+        }
+      ]
+    },
+    {
+      "name": "long_digit_run",
+      "priority": 10,
+      "replacements": 1,
+      "spans": [
+        {
+          "start": 98,
+          "end": 112,
+          "matched": "20260925000123",
+          "replacement": "[NUM]"
+        }
+      ]
+    }
+  ],
+  "shadowed": [
+    {
+      "rule": "cn_mobile",
+      "start": 23,
+      "end": 34,
+      "matched": "13800138000",
+      "reason": "locked-by:email"
+    },
+    {
+      "rule": "cn_mobile",
+      "start": 78,
+      "end": 89,
+      "matched": "13800138000",
+      "reason": "locked-by:email"
+    },
+    {
+      "rule": "long_digit_run",
+      "start": 8,
+      "end": 19,
+      "matched": "13800138000",
+      "reason": "locked-by:cn_mobile"
+    },
+    {
+      "rule": "long_digit_run",
+      "start": 23,
+      "end": 34,
+      "matched": "13800138000",
+      "reason": "locked-by:email"
+    },
+    {
+      "rule": "long_digit_run",
+      "start": 50,
+      "end": 67,
+      "matched": "11010119900307771",
+      "reason": "locked-by:cn_id_card"
+    },
+    {
+      "rule": "long_digit_run",
+      "start": 78,
+      "end": 89,
+      "matched": "13800138000",
+      "reason": "locked-by:email"
+    },
+    {
+      "rule": "long_digit_run",
+      "start": 141,
+      "end": 152,
+      "matched": "13912345678",
+      "reason": "locked-by:cn_mobile"
+    }
+  ],
+  "summary": {
+    "input_length": 192,
+    "output_length": 156,
+    "total_replacements": 6,
+    "total_shadowed": 7
+  }
+}
