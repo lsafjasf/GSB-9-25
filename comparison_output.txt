@@ -1,0 +1,20 @@
+数据覆盖五类问题：宽字符(姓名/李雷)、组合序列(cafe+U+0301)、
+表情符号(👍🏽/👨‍👩‍👧/❤️)、零宽字符(a+ZWSP+b)、制表符(x\ty)
+
+=== 修复前（table_align_buggy，len() 当宽度）===
+0         1         2         3
+0123456789012345678901234567890
+姓名     café  👍🏽     a​b  x	y
+Alice  cafe   👨‍👩‍👧  abc  ok
+李雷     naïve  ❤️     ab   z
+
+=== 修复后（table_align，统一 display_width）===
+0         1         2         3
+0123456789012345678901234567890
+姓名   café   👍🏽  a​b   x       y
+Alice  cafe   👨‍👩‍👧  abc  ok
+李雷   naïve  ❤️  ab   z
+
+=== 截断对照：truncate(👨‍👩‍👧‍👦ab, 3) ===
+修复前: '👨\u200d👩'  # 切碎了 ZWJ 序列
+修复后: '👨\u200d👩\u200d👧\u200d👦a'  # 整簇保留，宽度=3
