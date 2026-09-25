@@ -1,0 +1,296 @@
+"""Chunked in-memory sorted index with snapshot-isolated reads.
+
+Storage layout:
+    The index is an ordered list of blocks. Each block owns two
+    preallocated slot arrays (keys / values) of a fixed capacity and a
+    ``count`` of live entries. Blocks hold disjoint, sorted key ranges.
+
+Concurrency model:
+    Blocks are *immutable once published*. Every mutation builds new
+    block objects for the affected ranges and then atomically swaps the
+    block-list reference (under a write lock). A reader that grabbed the
+    previous reference keeps a fully consistent snapshot: it sees either
+    the complete state before a delete or the complete state after it,
+    never an intermediate state.
+
+Space reclamation:
+    Point deletes keep the block's slot arrays (free slots become
+    reusable capacity, visible as fragmentation). Range deletes drop
+    fully-covered blocks wholesale and rebuild partially-covered edge
+    blocks with exact-fit arrays, so the capacity of deleted interior
+    keys is returned to the allocator immediately.
+"""
+
+import bisect
+import threading
+
+DEFAULT_BLOCK_CAPACITY = 1024
+
+
+class _Block:
+    """A fixed-capacity sorted run of key/value pairs.
+
+    Never mutated after being published into an index's block list.
+    """
+
+    __slots__ = ("keys", "vals", "count")
+
+    def __init__(self, capacity):
+        self.keys = [None] * capacity
+        self.vals = [None] * capacity
+        self.count = 0
+
+    @property
+    def capacity(self):
+        return len(self.keys)
+
+    def pairs(self):
+        return zip(self.keys[: self.count], self.vals[: self.count])
+
+
+def _block_from_pairs(pairs, capacity=None):
+    """Build a published-ready block from an iterable of (key, value)."""
+    pairs = list(pairs)
+    cap = max(len(pairs), capacity if capacity is not None else len(pairs), 1)
+    block = _Block(cap)
+    for i, (k, v) in enumerate(pairs):
+        block.keys[i] = k
+        block.vals[i] = v
+    block.count = len(pairs)
+    return block
+
+
+def _clone_with_insert(block, pos, key, value):
+    """Copy ``block`` with (key, value) inserted at ``pos`` (room required)."""
+    nb = _Block(block.capacity)
+    nb.keys[:pos] = block.keys[:pos]
+    nb.keys[pos] = key
+    nb.keys[pos + 1 : block.count + 1] = block.keys[pos : block.count]
+    nb.vals[:pos] = block.vals[:pos]
+    nb.vals[pos] = value
+    nb.vals[pos + 1 : block.count + 1] = block.vals[pos : block.count]
+    nb.count = block.count + 1
+    return nb
+
+
+def _clone_without(block, pos):
+    """Copy ``block`` with the entry at ``pos`` removed (capacity kept)."""
+    nb = _Block(block.capacity)
+    nb.keys[:pos] = block.keys[:pos]
+    nb.keys[pos : block.count - 1] = block.keys[pos + 1 : block.count]
+    nb.vals[:pos] = block.vals[:pos]
+    nb.vals[pos : block.count - 1] = block.vals[pos + 1 : block.count]
+    nb.count = block.count - 1
+    return nb
+
+
+def _clone_with_value(block, pos, value):
+    nb = _Block(block.capacity)
+    nb.keys[: block.count] = block.keys[: block.count]
+    nb.vals[: block.count] = block.vals[: block.count]
+    nb.vals[pos] = value
+    nb.count = block.count
+    return nb
+
+
+class Snapshot:
+    """Immutable view of an index at a point in time."""
+
+    __slots__ = ("_blocks", "_size")
+
+    def __init__(self, blocks, size):
+        self._blocks = blocks
+        self._size = size
+
+    def __len__(self):
+        return self._size
+
+    def items(self):
+        for block in self._blocks:
+            yield from block.pairs()
+
+    def keys(self):
+        for block in self._blocks:
+            yield from block.keys[: block.count]
+
+    def stats(self):
+        capacity = sum(b.capacity for b in self._blocks)
+        return {
+            "size": self._size,
+            "capacity": capacity,
+            "blocks": len(self._blocks),
+            "fragmentation": capacity - self._size,
+        }
+
+
+class SortedIndex:
+    """Sorted unique-key index supporting point and range deletes."""
+
+    def __init__(self, pairs=(), block_capacity=DEFAULT_BLOCK_CAPACITY):
+        if block_capacity < 2:
+            raise ValueError("block_capacity must be >= 2")
+        self._block_capacity = block_capacity
+        self._lock = threading.Lock()
+        self._blocks = []
+        self._starts = []
+        self._size = 0
+        for k, v in pairs:
+            self.put(k, v)
+
+    @classmethod
+    def bulk_load(cls, sorted_pairs, block_capacity=DEFAULT_BLOCK_CAPACITY):
+        """Build an index from already-sorted unique pairs in O(n)."""
+        idx = cls(block_capacity=block_capacity)
+        pairs = list(sorted_pairs)
+        blocks = []
+        for i in range(0, len(pairs), idx._block_capacity):
+            blocks.append(_block_from_pairs(pairs[i : i + idx._block_capacity],
+                                            idx._block_capacity))
+        idx._blocks = blocks
+        idx._starts = [b.keys[0] for b in blocks]
+        idx._size = len(pairs)
+        return idx
+
+    # ---------------------------------------------------------- reads
+    def snapshot(self):
+        """Return an immutable, consistent view of the current state."""
+        return Snapshot(self._blocks, self._size)
+
+    def __len__(self):
+        return self._size
+
+    def __contains__(self, key):
+        found, _, _, _ = self._locate_in(self._starts, self._blocks, key)
+        return found
+
+    def get(self, key, default=None):
+        found, block, pos, _ = self._locate_in(self._starts, self._blocks, key)
+        if not found:
+            return default
+        return block.vals[pos]
+
+    def items(self):
+        """Iterate (key, value) in sorted order over a consistent snapshot."""
+        return self.snapshot().items()
+
+    def stats(self):
+        return self.snapshot().stats()
+
+    @staticmethod
+    def _locate_in(starts, blocks, key):
+        i = bisect.bisect_right(starts, key) - 1
+        if i < 0:
+            if not blocks:
+                return False, None, 0, 0
+            block = blocks[0]
+            return False, block, 0, 0
+        block = blocks[i]
+        pos = bisect.bisect_left(block.keys, key, 0, block.count)
+        found = pos < block.count and block.keys[pos] == key
+        return found, block, pos, i
+
+    # ---------------------------------------------------------- writes
+    def _publish(self, blocks):
+        self._blocks = blocks
+        self._starts = [b.keys[0] for b in blocks]
+
+    def put(self, key, value):
+        with self._lock:
+            blocks, starts = self._blocks, self._starts
+            if not blocks:
+                nb = _Block(self._block_capacity)
+                nb.keys[0] = key
+                nb.vals[0] = value
+                nb.count = 1
+                self._publish([nb])
+                self._size = 1
+                return
+            found, block, pos, i = self._locate_in(starts, blocks, key)
+            new_blocks = list(blocks)
+            if found:
+                new_blocks[i] = _clone_with_value(block, pos, value)
+                self._publish(new_blocks)
+                return
+            if block.count < block.capacity:
+                new_blocks[i] = _clone_with_insert(block, pos, key, value)
+            else:
+                pairs = list(block.pairs())
+                pairs.insert(pos, (key, value))
+                mid = len(pairs) // 2
+                left = _block_from_pairs(pairs[:mid], self._block_capacity)
+                right = _block_from_pairs(pairs[mid:], self._block_capacity)
+                new_blocks[i : i + 1] = [left, right]
+            self._publish(new_blocks)
+            self._size += 1
+
+    __setitem__ = put
+
+    def delete(self, key):
+        """Remove ``key``; raises KeyError if absent."""
+        with self._lock:
+            blocks, starts = self._blocks, self._starts
+            found, block, pos, i = self._locate_in(starts, blocks, key)
+            if not found:
+                raise KeyError(key)
+            self._delete_at(blocks, i, block, pos)
+            self._size -= 1
+
+    def discard(self, key):
+        """Remove ``key`` if present; return whether it was removed."""
+        with self._lock:
+            blocks, starts = self._blocks, self._starts
+            found, block, pos, i = self._locate_in(starts, blocks, key)
+            if not found:
+                return False
+            self._delete_at(blocks, i, block, pos)
+            self._size -= 1
+            return True
+
+    def _delete_at(self, blocks, i, block, pos):
+        # Point deletes keep the block's slot capacity: freed slots stay
+        # available for future inserts (visible as fragmentation).
+        if block.count == 1:
+            new_blocks = blocks[:i] + blocks[i + 1 :]
+        else:
+            new_blocks = list(blocks)
+            new_blocks[i] = _clone_without(block, pos)
+        self._publish(new_blocks)
+
+    def delete_range(self, lo, hi):
+        """Delete every key in the half-open interval [lo, hi).
+
+        Returns the number of removed entries. Fully covered blocks are
+        dropped wholesale (their capacity is reclaimed); partially
+        covered edge blocks are rebuilt exact-fit.
+        """
+        if not lo < hi:
+            return 0
+        with self._lock:
+            blocks = self._blocks
+            if not blocks:
+                return 0
+            new_blocks = []
+            removed = 0
+            changed = False
+            for block in blocks:
+                first = block.keys[0]
+                last = block.keys[block.count - 1]
+                if last < lo or first >= hi:
+                    new_blocks.append(block)  # disjoint: keep as-is
+                elif first >= lo and last < hi:
+                    removed += block.count  # fully covered: drop wholesale
+                    changed = True
+                else:
+                    survivors = [
+                        (k, v)
+                        for k, v in block.pairs()
+                        if k < lo or k >= hi
+                    ]
+                    removed += block.count - len(survivors)
+                    if survivors:
+                        new_blocks.append(_block_from_pairs(survivors))
+                    changed = True
+            if changed:
+                self._publish(new_blocks)
+                self._size -= removed
+            return removed
