@@ -1,0 +1,23 @@
+user=alice logged in from 10.0.0.1 in 12ms
+user=bob logged in from 10.0.0.2 in 35ms
+user=carol logged in from 192.168.1.7 in 8ms
+GET /api/v1/users/123 200 3ms
+GET /api/v1/users/456 200 5ms
+GET /api/v1/orders/789 404 2ms
+worker=w1 job=job-3f8a2c done
+worker=w2 job=job-9b1e04 done
+worker=w1 job=job-77aa10 done
+msg="user \"alice\" timed out" level=WARN
+msg="user \"bob\" timed out" level=WARN
+{"user":"alice","id":123,"ok":true}
+{"user":"bob","id":456,"ok":false}
+txn 8f3a2bc1 failed after 3 retries
+txn 9c4d21e0 failed after 5 retries
+req id=550e8400-e29b-41d4-a716-446655440000 path=/var/log/app.log
+req id=6ba7b810-9dad-11d1-80b4-00c04fd430c8 path=/var/log/sys.log
+a=1 b=2 c=3
+a=4 b=5 c=6
+c=7 b=8 a=9
+c=10 b=11 a=12
+this singleton line appears exactly once
+another totally unique event happened here

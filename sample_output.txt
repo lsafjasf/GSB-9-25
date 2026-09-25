@@ -1,0 +1,26 @@
+== logtpl report ==
+total lines      : 23
+templates        : 8 valid (support>=2), 12 total
+coverage         : 82.61% (19/23 lines explained by valid templates)
+avg placeholders : 2.50 per valid template
+
+-- templates (sorted by count desc, then template) --
+  [count=3        ph=3] GET <PATH> <NUM> <DUR>
+  [count=3        ph=3] user=<STR> logged in from <IP> in <DUR>
+  [count=3        ph=2] worker=<STR> job=<ID> done
+  [count=2        ph=3] a=<NUM> b=<NUM> c=<NUM>
+  [count=2        ph=3] c=<NUM> b=<NUM> a=<NUM>
+  [count=2        ph=2] msg=<STR> level=<STR>
+  [count=2        ph=2] req id=<UUID> path=<PATH>
+  [count=2        ph=2] txn <ID> failed after <NUM> retries
+
+-- reorder-variant groups (same fields, different order; templates are position-sensitive so they stay separate) --
+  group 1:
+    a=<NUM> b=<NUM> c=<NUM>
+    c=<NUM> b=<NUM> a=<NUM>
+
+-- unclustered lines (4) --
+  another totally unique event happened here
+  this singleton line appears exactly once
+  {"user":"alice","id":123,"ok":true}
+  {"user":"bob","id":456,"ok":false}
