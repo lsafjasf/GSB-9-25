@@ -1,0 +1,20 @@
+{
+  "en": {
+    "files.selected": "{user} selected {count, plural, one{# file} other{# files}}",
+    "inbox.summary": "Hello {user}, you have {count, plural, one{# message} other{# messages}} since {date}.",
+    "quota.notice": "Limit {limit} reached for {user}",
+    "welcome": "Welcome, {user}!"
+  },
+  "zh": {
+    "files.selected": "{user} 已选择 {count, plural, other{# 个文件}}",
+    "inbox.summary": "{user}，自 {date} 以来你有 {count, plural, other{# 条消息}}。",
+    "welcome": "欢迎，{user}！"
+  },
+  "ru": {
+    "files.selected": "{user} выбрал(а) {count, plural, one{# файл} few{# файла} many{# файлов} other{# файла}}",
+    "welcome": "Добро пожаловать, {user}!"
+  },
+  "fr": {
+    "files.selected": "{user} a sélectionné {count, plural, one{# fichier} other{# fichiers}}"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "en": {
+    "fallback": [],
+    "plural_rules": [
+      {"category": "one",   "when": [{"op": "eq", "value": 1}]},
+      {"category": "other", "when": [{"op": "always"}]}
+    ],
+    "number": {"thousands_sep": ",", "decimal_sep": ".", "group": 3, "max_decimals": 2, "trim_zeros": true},
+    "date":   {"order": ["month", "day", "year"], "separator": "/", "pad": true}
+  },
+  "zh": {
+    "fallback": ["en"],
+    "plural_rules": [
+      {"category": "other", "when": [{"op": "always"}]}
+    ],
+    "number": {"thousands_sep": ",", "decimal_sep": ".", "group": 3, "max_decimals": 2, "trim_zeros": true},
+    "date":   {"order": ["year", "month", "day"], "separator": "-", "pad": true}
+  },
+  "ru": {
+    "fallback": ["en"],
+    "plural_rules": [
+      {"category": "other", "when": [{"op": "not_integer"}]},
+      {"category": "one",   "when": [{"op": "mod_eq", "mod": 10, "value": 1},
+                                     {"op": "mod_not_in", "mod": 100, "values": [11]}]},
+      {"category": "few",   "when": [{"op": "mod_in", "mod": 10, "values": [2, 3, 4]},
+                                     {"op": "mod_not_in", "mod": 100, "values": [12, 13, 14]}]},
+      {"category": "many",  "when": [{"op": "always"}]}
+    ],
+    "number": {"thousands_sep": " ", "decimal_sep": ",", "group": 3, "max_decimals": 2, "trim_zeros": true},
+    "date":   {"order": ["day", "month", "year"], "separator": ".", "pad": true}
+  },
+  "fr": {
+    "fallback": ["en"],
+    "plural_rules": [
+      {"category": "one",   "when": [{"op": "eq", "value": 1}]},
+      {"category": "other", "when": [{"op": "always"}]}
+    ],
+    "number": {"thousands_sep": " ", "decimal_sep": ",", "group": 3, "max_decimals": 2, "trim_zeros": true},
+    "date":   {"order": ["day", "month", "year"], "separator": "/", "pad": true}
+  }
+}
