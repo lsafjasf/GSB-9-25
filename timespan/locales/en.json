@@ -1,0 +1,18 @@
+{
+  "language": "en",
+  "plural_rule": "one_other",
+  "joiner": " ",
+  "component_template": "{value} {unit}",
+  "past": "{span} ago",
+  "future": "in {span}",
+  "below_min_unit": { "mode": "just_now", "text": "just now" },
+  "units": [
+    { "id": "year",   "seconds": 31557600, "forms": { "one": "year",   "other": "years" } },
+    { "id": "month",  "seconds": 2629800,  "forms": { "one": "month",  "other": "months" } },
+    { "id": "week",   "seconds": 604800,   "forms": { "one": "week",   "other": "weeks" } },
+    { "id": "day",    "seconds": 86400,    "forms": { "one": "day",    "other": "days" } },
+    { "id": "hour",   "seconds": 3600,     "forms": { "one": "hour",   "other": "hours" } },
+    { "id": "minute", "seconds": 60,       "forms": { "one": "minute", "other": "minutes" } },
+    { "id": "second", "seconds": 1,        "forms": { "one": "second", "other": "seconds" } }
+  ]
+}

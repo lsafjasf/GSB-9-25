@@ -1,0 +1,18 @@
+{
+  "language": "zh",
+  "plural_rule": "other_only",
+  "joiner": "",
+  "component_template": "{value}{unit}",
+  "past": "{span}前",
+  "future": "{span}后",
+  "below_min_unit": { "mode": "just_now", "text": "刚刚" },
+  "units": [
+    { "id": "year",   "seconds": 31557600, "forms": { "other": "年" } },
+    { "id": "month",  "seconds": 2629800,  "forms": { "other": "个月" } },
+    { "id": "week",   "seconds": 604800,   "forms": { "other": "周" } },
+    { "id": "day",    "seconds": 86400,    "forms": { "other": "天" } },
+    { "id": "hour",   "seconds": 3600,     "forms": { "other": "小时" } },
+    { "id": "minute", "seconds": 60,       "forms": { "other": "分钟" } },
+    { "id": "second", "seconds": 1,        "forms": { "other": "秒" } }
+  ]
+}
