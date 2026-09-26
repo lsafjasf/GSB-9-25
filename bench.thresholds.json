@@ -1,0 +1,5 @@
+{
+  "overall": 30,
+  "directories": {"src/mod1": 30, "src/mod25": 30},
+  "files": {"src/mod1/file1.py": 30}
+}

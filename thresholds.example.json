@@ -1,0 +1,12 @@
+{
+  "overall": 80,
+  "directories": {
+    "src/core": 90,
+    "src/utils": 80,
+    "src/web": 60
+  },
+  "files": {
+    "src/core/engine.py": 95,
+    "src/web/handler.py": 75
+  }
+}

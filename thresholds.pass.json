@@ -1,0 +1,10 @@
+{
+  "overall": 75,
+  "directories": {
+    "src/core": 90,
+    "src/utils": 60
+  },
+  "files": {
+    "src/core/engine.py": 95
+  }
+}
