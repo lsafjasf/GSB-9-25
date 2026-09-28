@@ -197,6 +197,14 @@ def integrate(
 
     value0, err0, n = _qk15(g, lo, hi)
     neval = n
+    # 被积函数在采样点返回非有限值（inf/nan）：无法构造有意义的
+    # 误差估计，直接走未收敛报告路径，绝不当作收敛返回。
+    if not (math.isfinite(value0) and math.isfinite(err0)):
+        return Result(
+            sign * value0, math.inf, False, neval, 1,
+            time.perf_counter() - t0,
+            "integrand returned non-finite value at sample points",
+        )
     # 堆元素：(-err, seq, a, b, value, err, depth)
     heap = [(-err0, 0, lo, hi, value0, err0, 0)]
     seq = 1
@@ -211,19 +219,27 @@ def integrate(
             converged = False
             message = f"max_evals reached ({max_evals}); error estimate {total_err:.3g} exceeds tolerance"
             break
-        neg_err, _, sa, sb, sval, serr, depth = heapq.heappop(heap)
-        if depth >= max_depth:
-            heapq.heappush(heap, (neg_err, seq, sa, sb, sval, serr, depth))
-            seq += 1
+        if not heap:
+            # 所有子区间均已到顶被冻结，误差仍超容差。
             converged = False
             message = f"max_depth reached ({max_depth}); error estimate {total_err:.3g} exceeds tolerance"
             break
+        neg_err, _, sa, sb, sval, serr, depth = heapq.heappop(heap)
+        if depth >= max_depth:
+            # 只冻结该子区间：其值与误差贡献保留在 total/total_err 中，
+            # 但不再细分；更浅的子区间仍可继续压低总误差。
+            continue
         mid = 0.5 * (sa + sb)
         v1, e1, n1 = _qk15(g, sa, mid)
         v2, e2, n2 = _qk15(g, mid, sb)
         neval += n1 + n2
         total += (v1 + v2) - sval
         total_err += (e1 + e2) - serr
+        if not (math.isfinite(total) and math.isfinite(total_err)):
+            # 细分后采样点命中非有限值（如内部奇点），走未收敛报告路径。
+            converged = False
+            message = "integrand returned non-finite value at sample points"
+            break
         heapq.heappush(heap, (-e1, seq, sa, mid, v1, e1, depth + 1))
         seq += 1
         heapq.heappush(heap, (-e2, seq, mid, sb, v2, e2, depth + 1))

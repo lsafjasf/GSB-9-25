@@ -89,6 +89,33 @@ lo, hi = r.interval
 check("未收敛区间覆盖真值", lo <= exact <= hi,
       f"interval=({lo:.6g}, {hi:.6g}), exact={exact}")
 
+# 3c. 被积函数在采样点返回非有限值：必须走未收敛报告路径，
+#     不得因 inf > inf 为 False 而误判收敛并返回无穷大结果。
+r = integrate(lambda x: 1.0 / x if x != 0.0 else math.inf, -1.0, 1.0)
+check("非有限值(初始面板)触发未收敛",
+      not r.converged and "non-finite" in r.message, f"msg={r.message!r}")
+
+
+# 3d. 细分后命中内部奇点：x=0.25 恰是子区间 [0, 0.5] 的中心采样点。
+def _spike(x):
+    return math.inf if x == 0.25 else math.sqrt(x)
+
+
+r = integrate(_spike, 0.0, 1.0)
+check("非有限值(细分后命中)触发未收敛",
+      not r.converged and "non-finite" in r.message, f"msg={r.message!r}")
+
+# 3e. max_depth 只冻结到顶的子区间：强尖点 1e6*sqrt(x) 把含 0 的子区间
+#     一路推到深度上限并冻结（残留误差 ~7e-3 < epsabs），此时弱尖点
+#     1e4*sqrt(1-x) 的更浅子区间仍可继续细分，把总误差压进容差。
+#     （旧的“到顶即整体判未收敛”实现在此用例上会返回 converged=False。）
+r = integrate(lambda x: 1e6 * math.sqrt(x) + 1e4 * math.sqrt(1.0 - x),
+              0.0, 1.0, epsabs=1e-2, epsrel=0.0, max_depth=10)
+check("max_depth 冻结到顶区间后整体仍收敛", r.converged, f"msg={r.message!r}")
+check("冻结后结果精度达标",
+      abs(r.value - (1e6 + 1e4) * 2.0 / 3.0) <= r.error,
+      f"value={r.value:.15g} err={r.error:.3g}")
+
 # ---------------------------------------------------------------------------
 # 4. 与固定均匀细分方法的求值次数/耗时对比
 # ---------------------------------------------------------------------------
