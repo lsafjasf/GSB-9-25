@@ -36,6 +36,7 @@ pass.  Failures use distinct exception classes:
 """
 
 import zlib
+from array import array
 
 MAGIC = b"MCP1"
 HEADER_SIZE = 13
@@ -65,35 +66,104 @@ class ChecksumError(Error):
     """Structurally complete frame whose payload fails the CRC-32 check."""
 
 
+HASH_BITS = 20
+HASH_SIZE = 1 << HASH_BITS
+HASH_MASK = HASH_SIZE - 1
+
+# A plain backward scan is the cheapest possible search while it decides
+# quickly (a max-length match within the nearest few candidates, or very
+# few candidates at all).  Only when one query examines more than this
+# many candidates without reaching a decision does the encoder build the
+# 3-byte hash-chain index and use it for the rest of the stream.
+_SCAN_CAP = 256
+
+
 def _lz_encode(data: bytes) -> bytearray:
     """Deterministic LZSS-style encoder.
 
     Ties between equal-length matches always resolve to the nearest offset,
     and no call-global state is consulted, so output depends only on input.
+
+    Search strategy: each position first tries a nearest-first backward
+    scan capped at ``_SCAN_CAP`` candidates.  The scan decides exactly when
+    it finds a max-length match or runs out of candidates; if it would
+    scan further, the encoder switches (once, permanently) to a hash-chain
+    index over 3-byte prefixes.  Two different 3-byte prefixes can never
+    form a length-3 match, so chain candidates are exactly the scan
+    candidates worth measuring, still visited nearest-first with strict
+    '>' updates: the emitted tokens are byte-identical to a full backward
+    scan, while low-match-density data (the kind that ends up stored RAW)
+    costs expected-linear instead of quadratic time.  The hash mixes fixed
+    constants only -- no dependence on the process hash seed.
     """
     payload = bytearray()
     n = len(data)
+    head = None          # hash-chain index, built lazily on first hard query
+    prev = None
+    indexed_upto = 0     # every position < indexed_upto is in the chain
     i = 0
     while i < n:
         best_len = 0
         best_off = 0
         if i + 3 <= n:
-            start = 0
             limit = min(n - i, MAX_MATCH_ADD + 3)
-            # Search nearest-first; strict '>' keeps the nearest offset on
-            # ties and removes any dependence on dict/set iteration order.
-            for p in range(i - 1, start - 1, -1):
-                off = i - p
-                if off > MAX_OFFSET:
-                    break
-                ml = 0
-                while ml < limit and data[p + ml] == data[i + ml]:
-                    ml += 1
-                if ml > best_len:
-                    best_len = ml
-                    best_off = off
-                    if ml == limit:
+            if head is None:
+                # Cheap path: nearest-first scan, capped.  Strict '>'
+                # keeps the nearest offset on ties.
+                p = i - 1
+                scanned = 0
+                decided = False
+                while p >= 0:
+                    off = i - p
+                    if off > MAX_OFFSET:
+                        decided = True
                         break
+                    ml = 0
+                    while ml < limit and data[p + ml] == data[i + ml]:
+                        ml += 1
+                    if ml > best_len:
+                        best_len = ml
+                        best_off = off
+                        if ml == limit:
+                            decided = True
+                            break
+                    scanned += 1
+                    if scanned >= _SCAN_CAP:
+                        break
+                    p -= 1
+                else:
+                    decided = True      # ran out of candidates
+                if not decided:
+                    head = array("i", [-1]) * HASH_SIZE
+                    prev = array("i", [-1]) * n
+            if head is not None:
+                # Index every position passed since the previous query,
+                # then walk this position's chain nearest-first.
+                k = indexed_upto
+                while k < i:
+                    if k + 3 <= n:
+                        h = ((data[k] * 54059) ^ (data[k + 1] * 7699)
+                             ^ (data[k + 2] * 8697)) & HASH_MASK
+                        prev[k] = head[h]
+                        head[h] = k
+                    k += 1
+                indexed_upto = i
+                h = ((data[i] * 54059) ^ (data[i + 1] * 7699)
+                     ^ (data[i + 2] * 8697)) & HASH_MASK
+                p = head[h]
+                while p >= 0:
+                    off = i - p
+                    if off > MAX_OFFSET:
+                        break
+                    ml = 0
+                    while ml < limit and data[p + ml] == data[i + ml]:
+                        ml += 1
+                    if ml > best_len:
+                        best_len = ml
+                        best_off = off
+                        if ml == limit:
+                            break
+                    p = prev[p]
         if best_len >= 3:
             tag_byte = 0x80 | ((best_off >> 24) & 0x0F)
             payload.append(tag_byte)
@@ -115,8 +185,13 @@ def compress(data: bytes) -> bytes:
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise TypeError("data must be bytes-like")
     data = bytes(data)
-    if len(data) > 0xFFFFFFFF:
-        raise HeaderError("input too large for MCP1 frame")
+    # Same ceiling the decoder enforces: a frame that could never be
+    # decompressed must not be produced in the first place.
+    if len(data) > MAX_DECODED_SIZE:
+        raise HeaderError(
+            "input length %d exceeds MCP1 decoded-size limit of %d bytes"
+            % (len(data), MAX_DECODED_SIZE)
+        )
 
     lz_payload = bytes(_lz_encode(data))
     stored_size = len(data)

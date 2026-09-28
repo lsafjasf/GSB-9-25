@@ -14,7 +14,7 @@ mini_compress/
 tests/
   test_repro_legacy.py   五类缺陷的稳定复现用例（针对旧实现）
   test_mini_compress.py  往返/确定性/存储模式/错误分类/截断损坏模糊测试
-benchmark_sizes.py       不同数据分布下的体积对比
+benchmark_sizes.py       不同数据分布下的体积与耗时对比（含修复前后编码器对照）
 FORMAT.md                格式规范、修复前后差异、迁移说明
 ```
 
@@ -30,7 +30,7 @@ python3 -m unittest tests.test_repro_legacy -v
 # 只看修复回归
 python3 -m unittest tests.test_mini_compress -v
 
-# 体积对比
+# 体积与耗时对比
 python3 benchmark_sizes.py
 ```
 

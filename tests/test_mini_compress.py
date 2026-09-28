@@ -388,3 +388,110 @@ class SizeComparisonTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class EncoderSearchTests(unittest.TestCase):
+    """The capped-scan/hash-chain search must emit exactly the tokens a
+    full backward scan would (nearest match, strict '>' tie-break)."""
+
+    @staticmethod
+    def _reference_scan(data):
+        from mini_compress.mini_compress import (
+            MAX_LITERAL, MAX_MATCH_ADD, MAX_OFFSET,
+        )
+        payload = bytearray()
+        n = len(data)
+        i = 0
+        while i < n:
+            best_len = 0
+            best_off = 0
+            if i + 3 <= n:
+                limit = min(n - i, MAX_MATCH_ADD + 3)
+                for p in range(i - 1, -1, -1):
+                    off = i - p
+                    if off > MAX_OFFSET:
+                        break
+                    ml = 0
+                    while ml < limit and data[p + ml] == data[i + ml]:
+                        ml += 1
+                    if ml > best_len:
+                        best_len = ml
+                        best_off = off
+                        if ml == limit:
+                            break
+            if best_len >= 3:
+                payload.append(0x80 | ((best_off >> 24) & 0x0F))
+                payload.append((best_off >> 16) & 0xFF)
+                payload.append((best_off >> 8) & 0xFF)
+                payload.append(best_off & 0xFF)
+                payload.append(best_len - 3)
+                i += best_len
+            else:
+                j = min(i + MAX_LITERAL, n)
+                payload.append(j - i)
+                payload += data[i:j]
+                i = j
+        payload.append(0x00)
+        return payload
+
+    def test_encoder_matches_full_scan_byte_for_byte(self):
+        from mini_compress.mini_compress import _lz_encode
+        rng = random.Random(2024)
+        cases = [
+            b"", b"\x00", b"ab", b"abc", b"\x00" * 300,
+            b"abc" * 100, b"abcdefgh" * 50, bytes(range(256)),
+            bytes(range(255, -1, -1)), b"a" * 63 + b"b",
+            bytes([i & 3 for i in range(500)]),
+            # Force the hash-chain path (scan exceeds _SCAN_CAP) ...
+            os.urandom(2000),
+            os.urandom(1) * 300 + os.urandom(1500),   # mixed density
+            os.urandom(1500) + b"abc" * 400,          # chain then matches
+        ]
+        for _ in range(80):
+            kind = rng.randrange(5)
+            n = rng.randrange(0, 1500)
+            if kind == 0:
+                data = bytes(rng.randrange(256) for _ in range(n))
+            elif kind == 1:
+                data = bytes([rng.randrange(4)]) * n
+            elif kind == 2:
+                block = bytes(rng.randrange(256)
+                              for _ in range(rng.randrange(1, 9)))
+                data = (block * (n // max(1, len(block)) + 1))[:n]
+            elif kind == 3:
+                data = bytes([rng.choice((0x00, 0x80, 0xFF))
+                              for _ in range(n)])
+            else:
+                data = bytes([i & 0xFF for i in range(n)])
+            cases.append(data)
+        for data in cases:
+            with self.subTest(n=len(data), head=data[:8]):
+                self.assertEqual(bytes(_lz_encode(data)),
+                                 bytes(self._reference_scan(data)))
+
+
+class SizeLimitTests(unittest.TestCase):
+    """Compress and decompress must enforce the same decoded-size ceiling."""
+
+    def test_compress_uses_decoder_limit(self):
+        import mini_compress.mini_compress as mc
+        # The constant the compressor checks is the one the decoder enforces.
+        data = b"\x00" * (mc.MAX_DECODED_SIZE + 1)
+        with self.assertRaises(HeaderError):
+            mc.compress(data)
+
+    def test_oversized_input_rejected_before_encoding(self):
+        import mini_compress.mini_compress as mc
+        real_limit = mc.MAX_DECODED_SIZE
+        mc.MAX_DECODED_SIZE = 8
+        try:
+            self.assertEqual(decompress(compress(b"\x00" * 8)), b"\x00" * 8)
+            with self.assertRaises(HeaderError):
+                compress(b"\x00" * 9)
+            # And the decoder independently refuses a frame that declares
+            # more than the limit.
+            frame = _frame(MODE_RAW, b"x" * 9, payload=b"x" * 9)
+            with self.assertRaises(HeaderError):
+                decompress(frame)
+        finally:
+            mc.MAX_DECODED_SIZE = real_limit
