@@ -41,6 +41,28 @@ class TestLongAndShortOptions(unittest.TestCase):
         r = self.p.parse(["-o=a.txt"])
         self.assertEqual(r.output, "a.txt")
 
+    def test_short_equals_empty_is_empty_string(self):
+        # "-o=" is an explicit inline empty value, never "missing value".
+        r = self.p.parse(["-o=", "pos.txt"])
+        self.assertEqual(r.output, "")
+        self.assertEqual(r.positionals, ["pos.txt"])
+        self.assertEqual(len(r.positionals), 1)
+
+    def test_short_equals_value_keeps_following_positional(self):
+        # The "=" must not be dropped: "word" is the inline value, and a
+        # later token still lands in positionals.
+        r = self.p.parse(["-o=word", "pos.txt"])
+        self.assertEqual(r.output, "word")
+        self.assertEqual(r.positionals, ["pos.txt"])
+        self.assertEqual(len(r.positionals), 1)
+
+    def test_short_space_empty_string_is_empty_string(self):
+        # A separately passed empty string is the value, not a missing one.
+        r = self.p.parse(["-o", "", "pos.txt"])
+        self.assertEqual(r.output, "")
+        self.assertEqual(r.positionals, ["pos.txt"])
+        self.assertEqual(len(r.positionals), 1)
+
     def test_boolean_flag(self):
         r = self.p.parse(["--verbose"])
         self.assertIs(r.verbose, True)
