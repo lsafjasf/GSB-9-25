@@ -194,70 +194,144 @@ class ReclamationTest(unittest.TestCase):
 
 class ConcurrencyTest(unittest.TestCase):
     def test_readers_see_before_or_after_state(self):
-        n = 30_000
-        lo, hi = 7_500, 22_500
-        idx = make_index(range(n), block_capacity=256)
-        before_keys = list(range(n))
-        after_keys = [k for k in range(n) if not lo <= k < hi]
-        errors = []
-        stop = threading.Event()
-        barrier = threading.Barrier(5)
+        # One range delete, many readers. Every read must observe either
+        # the complete before-delete state or the complete after-delete
+        # state: key set, length, stats and boundary-key membership all
+        # taken from the SAME snapshot must agree. Repeated rounds with a
+        # tiny switch interval maximise the chance of catching a torn
+        # publish (new blocks paired with stale starts/size).
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            n = 30_000
+            lo, hi = 7_500, 22_500
+            removed = hi - lo
+            before_keys = list(range(n))
+            after_keys = [k for k in range(n) if not lo <= k < hi]
+            before_set, after_set = set(before_keys), set(after_keys)
+            # boundary and far-away keys exercise the old-starts/new-blocks
+            # mismatch that used to raise IndexError or lose a live key
+            probes = (0, lo - 1, lo, lo + 1, hi - 2, hi - 1, hi,
+                      hi + 1, n - 1)
 
-        def reader():
-            barrier.wait()
-            while not stop.is_set():
-                snap = idx.snapshot()
-                keys = list(snap.keys())
-                if len(keys) != snap.stats()["size"]:
-                    errors.append("size mismatch inside snapshot")
-                    return
-                if keys != before_keys and keys != after_keys:
-                    errors.append("reader observed intermediate state")
-                    return
+            for _ in range(8):
+                idx = make_index(range(n), block_capacity=256)
+                errors = []
+                stop = threading.Event()
+                barrier = threading.Barrier(5)
 
-        threads = [threading.Thread(target=reader) for _ in range(4)]
-        for t in threads:
-            t.start()
-        barrier.wait()
-        idx.delete_range(lo, hi)
-        stop.set()
-        for t in threads:
-            t.join()
-        self.assertEqual(errors, [])
-        self.assertEqual([k for k, _ in idx.items()], after_keys)
+                def reader():
+                    barrier.wait()
+                    while not stop.is_set():
+                        snap = idx.snapshot()
+                        keys = list(snap.keys())
+                        # whole key set must be exactly one legal state
+                        if keys == before_keys:
+                            allowed = before_set
+                            expected_size = n
+                        elif keys == after_keys:
+                            allowed = after_set
+                            expected_size = n - removed
+                        else:
+                            errors.append("reader observed intermediate key set "
+                                          "(len=%d)" % len(keys))
+                            return
+                        # length / stats from the same snapshot agree
+                        stats = snap.stats()
+                        if (len(snap) != expected_size
+                                or stats["size"] != expected_size
+                                or stats["blocks"] != len(snap._blocks)
+                                or stats["capacity"]
+                                != sum(b.capacity for b in snap._blocks)
+                                or stats["fragmentation"]
+                                != stats["capacity"] - expected_size):
+                            errors.append("snapshot length/stats torn: %r"
+                                          % (stats,))
+                            return
+                        # boundary membership from the SAME snapshot must
+                        # match the observed key set (no ghost / lost key)
+                        for p in probes:
+                            if (p in snap) != (p in allowed):
+                                errors.append("boundary membership torn for key "
+                                              "%d (present=%r)" % (p, p in snap))
+                                return
+                            want = p * 10 if p in allowed else None
+                            if snap.get(p) != want:
+                                errors.append("boundary get torn for key %d "
+                                              "(got %r)" % (p, snap.get(p)))
+                                return
+                        # direct index reads must never explode and must
+                        # also report a legal state
+                        if len(idx) not in (n, n - removed):
+                            errors.append("index length torn: %d" % len(idx))
+                            return
+                        for p in (lo - 1, hi, n - 1):  # live in both states
+                            try:
+                                present = p in idx
+                                value = idx.get(p)
+                            except Exception as exc:  # noqa: BLE001
+                                errors.append("live-key probe raised %s: %s"
+                                              % (type(exc).__name__, exc))
+                                return
+                            if not present or value != p * 10:
+                                errors.append("live key %d lost mid-delete" % p)
+                                return
+
+                threads = [threading.Thread(target=reader) for _ in range(4)]
+                for t in threads:
+                    t.start()
+                barrier.wait()
+                idx.delete_range(lo, hi)
+                stop.set()
+                for t in threads:
+                    t.join()
+                self.assertEqual(errors, [])
+                self.assertEqual([k for k, _ in idx.items()], after_keys)
+        finally:
+            sys.setswitchinterval(old_interval)
 
     def test_snapshots_consistent_under_repeated_range_deletes(self):
         n = 20_000
         idx = make_index(range(n), block_capacity=128)
         errors = []
         stop = threading.Event()
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
 
-        def reader():
-            while not stop.is_set():
-                snap = idx.snapshot()
-                keys = list(snap.keys())
-                if keys != sorted(keys) or len(set(keys)) != len(keys):
-                    errors.append("snapshot not strictly sorted unique")
-                    return
-                if len(keys) != snap.stats()["size"]:
-                    errors.append("snapshot size inconsistent")
-                    return
-                # every surviving key must map to its original value
-                for k, v in snap.items():
-                    if v != k * 10:
-                        errors.append("key/value mismatch in snapshot")
+        try:
+            def reader():
+                while not stop.is_set():
+                    snap = idx.snapshot()
+                    keys = list(snap.keys())
+                    if keys != sorted(keys) or len(set(keys)) != len(keys):
+                        errors.append("snapshot not strictly sorted unique")
                         return
+                    if len(keys) != snap.stats()["size"] or len(snap) != len(keys):
+                        errors.append("snapshot size inconsistent")
+                        return
+                    # every surviving key must map to its original value
+                    for k, v in snap.items():
+                        if v != k * 10:
+                            errors.append("key/value mismatch in snapshot")
+                            return
+                    # membership checks through the same snapshot agree
+                    for p in (0, 99, 100, n - 100, n - 1):
+                        if (p in snap) != (p in set(keys)):
+                            errors.append("membership inconsistent with key set")
+                            return
 
-        threads = [threading.Thread(target=reader) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for lo in range(0, n, 100):  # 200 adjacent range deletes
-            idx.delete_range(lo, lo + 100)
-        stop.set()
-        for t in threads:
-            t.join()
-        self.assertEqual(errors, [])
-        self.assertEqual(len(idx), 0)
+            threads = [threading.Thread(target=reader) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for lo in range(0, n, 100):  # 200 adjacent range deletes
+                idx.delete_range(lo, lo + 100)
+            stop.set()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(len(idx), 0)
+        finally:
+            sys.setswitchinterval(old_interval)
 
 
 if __name__ == "__main__":
