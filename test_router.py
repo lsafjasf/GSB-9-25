@@ -158,6 +158,23 @@ class TestConflictDetection(unittest.TestCase):
         with self.assertRaises(ConflictError):
             r.add_rule("/a/**")
 
+    def test_lexicographic_priority_shadows_despite_weaker_tail(self):
+        # A=(param, tailwild) sorts before B=(wild, static) lexicographically:
+        # the first differing segment (param < wild) decides priority, so A's
+        # weaker '**' tail does not save B. Every path B matches (/a/<seg>/c)
+        # is also matched by A, hence B is fully shadowed and must be rejected.
+        r = Router()
+        r.add_rule("/a/{x}/**")
+        with self.assertRaises(ConflictError) as ctx:
+            r.add_rule("/a/*/c")
+        msg = str(ctx.exception)
+        self.assertIn("/a/*/c", msg)       # names the shadowed rule
+        self.assertIn("/a/{x}/**", msg)    # names the shadower
+        # ...and via the text loader, with the shadowed rule's line number:
+        with self.assertRaises(ConflictError) as ctx2:
+            load_rules(Router(), "GET - /a/{x}/**\nGET - /a/*/c\n")
+        self.assertIn("line 2", str(ctx2.exception))
+
     def test_method_superset_shadows_subset(self):
         r = Router()
         r.add_rule("/a/{x}")  # any method
