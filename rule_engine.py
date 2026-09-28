@@ -358,9 +358,9 @@ class Engine:
     def run(self, facts: Dict[str, Any]) -> RunResult:
         state = State(dict(facts))
         trace = Trace()
-        assignments: Dict[str, tuple] = {}  # field -> (value, rule name)
+        assignments: Dict[str, tuple] = {}  # field -> (value, rule id, rule name)
 
-        for _, rule in self._ordered():
+        for rule_id, rule in self._ordered():
             entry = RuleTrace(rule=rule.name, status="skipped")
             trace.entries.append(entry)
             try:
@@ -374,7 +374,7 @@ class Engine:
             entry.status = "matched"
             for action in rule.actions:
                 if isinstance(action, Set):
-                    record = self._check_conflict(action, rule, assignments)
+                    record = self._check_conflict(action, rule_id, rule, assignments)
                     if record is not None:
                         trace.conflicts.append(record)
                         if self.conflict_strategy == "reject":
@@ -392,6 +392,7 @@ class Engine:
     @staticmethod
     def _check_conflict(
         action: Set,
+        rule_id: int,
         rule: Rule,
         assignments: Dict[str, tuple],
     ) -> Optional[ConflictRecord]:
@@ -399,14 +400,14 @@ class Engine:
         if (
             previous is None
             or previous[0] == action.value
-            or previous[1] == rule.name  # same rule may overwrite its own sets
+            or previous[1] == rule_id  # same rule may overwrite its own sets
         ):
-            assignments[action.field] = (action.value, rule.name)
+            assignments[action.field] = (action.value, rule_id, rule.name)
             return None
         return ConflictRecord(
             field=action.field,
             existing_value=previous[0],
-            existing_rule=previous[1],
+            existing_rule=previous[2],
             attempted_value=action.value,
             attempted_rule=rule.name,
             resolution="kept earlier assignment (higher priority / earlier "

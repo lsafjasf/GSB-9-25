@@ -154,6 +154,28 @@ class TestConflicts(unittest.TestCase):
         changes = result.trace.entries[0].changes
         self.assertEqual(len(changes), 2)
 
+    def test_same_named_rules_with_different_priority_conflict(self):
+        engine = make_engine("priority")
+        engine.add_rule(Rule("dup", Field("x").eq(1),
+                             [Set("verdict", "HIGH")], priority=10))
+        engine.add_rule(Rule("dup", Field("x").eq(1),
+                             [Set("verdict", "LOW")], priority=1))
+        result = engine.run({"x": 1})
+        # the two distinct rules (same name) assign different values -> conflict
+        self.assertEqual(len(result.trace.conflicts), 1)
+        conflict = result.trace.conflicts[0]
+        self.assertEqual(conflict.field, "verdict")
+        self.assertEqual(conflict.existing_rule, "dup")
+        self.assertEqual(conflict.attempted_rule, "dup")
+        self.assertEqual(conflict.existing_value, "HIGH")
+        self.assertEqual(conflict.attempted_value, "LOW")
+        # priority strategy: the higher-priority assignment must win
+        self.assertEqual(result.state.values["verdict"], "HIGH")
+        changes = result.trace.entries[1].changes
+        self.assertEqual(
+            changes, ["rejected set verdict (conflict, kept 'HIGH')"]
+        )
+
 
 class TestDynamicRulesAndDeterminism(unittest.TestCase):
     def test_add_and_remove_rules(self):
