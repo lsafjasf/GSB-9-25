@@ -42,6 +42,43 @@ class TestBasicSemantics(unittest.TestCase):
         self.bus.publish("evt", 2)
         self.assertEqual(calls, [2])
 
+    def test_once_with_filter_consumed_only_on_match(self):
+        # once + filter：不匹配的事件不得消耗一次性订阅
+        calls = []
+        self.bus.subscribe("evt", lambda v: calls.append(v), once=True,
+                           filter=lambda v: v % 2 == 0)
+        self.bus.publish("evt", 1)  # 不匹配：跳过，订阅保留
+        self.assertEqual(self.bus.subscriber_count("evt"), 1)
+        self.bus.publish("evt", 3)  # 仍不匹配
+        self.assertEqual(self.bus.subscriber_count("evt"), 1)
+        self.bus.publish("evt", 2)  # 匹配：投递并注销
+        self.assertEqual(calls, [2])
+        self.assertEqual(self.bus.subscriber_count("evt"), 0)
+        self.bus.publish("evt", 4)  # 已注销，不再投递
+        self.assertEqual(calls, [2])
+
+    def test_once_with_filter_exception_does_not_consume(self):
+        # once + filter：过滤器抛异常不消耗一次性订阅，异常照常汇总
+        calls = []
+        state = {"fail": True}
+
+        def filt(v):
+            if state["fail"]:
+                raise ZeroDivisionError("boom")
+            return True
+
+        self.bus.subscribe("evt", lambda v: calls.append(v), once=True,
+                           filter=filt)
+        errors = self.bus.publish("evt", 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ZeroDivisionError)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.bus.subscriber_count("evt"), 1)  # 订阅仍在
+        state["fail"] = False
+        self.assertEqual(self.bus.publish("evt", 2), [])
+        self.assertEqual(calls, [2])
+        self.assertEqual(self.bus.subscriber_count("evt"), 0)
+
     def test_unsubscribe_by_callback(self):
         calls = []
 

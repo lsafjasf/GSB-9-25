@@ -6,6 +6,8 @@
   本轮中已被取消（包括被前面订阅者取消、自取消）的订阅者一律跳过。
 - 发布期间新增/移除订阅采用快照语义：新增者本轮不投递，移除者本轮不再调用，
   不会重复投递也不会漏投递。
+- once 与 filter 组合时，过滤器通过（返回真值）才消耗一次性订阅；
+  不匹配或过滤器抛异常的事件不会用掉这次机会。
 - 订阅者（含过滤条件）抛出的异常不中断投递，全部汇总后由 publish 返回。
 - 支持弱引用订阅：被订阅对象回收后订阅自动失效并从注册表清除。
 """
@@ -92,6 +94,7 @@ class EventBus:
         weak:       为 True 时弱引用回调（绑定方法用 WeakMethod），
                     对象可回收后订阅自动失效；调用方需自行保持普通函数的引用。
         filter:     可选谓词，与 callback 收到相同参数，返回 False 则跳过本次投递。
+                    与 once 组合时，过滤器通过才消耗一次性订阅。
         返回 Subscription 句柄，可用其 cancel() 取消。
         """
         if not callable(callback):
@@ -133,13 +136,19 @@ class EventBus:
                 # 弱引用已死，顺手清理
                 self._remove(sub)
                 continue
+            if sub.filter is not None:
+                # 先求值过滤器：未通过（或抛异常）不消耗 once 订阅
+                try:
+                    if not sub.filter(*args, **kwargs):
+                        continue
+                except Exception as exc:  # 不中断其他订阅者，汇总返回
+                    errors.append(exc)
+                    continue
             if sub.once and not sub._claim_once():
                 continue
             if sub.once:
                 self._remove(sub)
             try:
-                if sub.filter is not None and not sub.filter(*args, **kwargs):
-                    continue
                 callback(*args, **kwargs)
             except Exception as exc:  # 不中断其他订阅者，汇总返回
                 errors.append(exc)
