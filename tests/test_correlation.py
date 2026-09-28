@@ -146,5 +146,76 @@ class CorrelationTest(unittest.IsolatedAsyncioTestCase):
         c.check_consistent()
 
 
+
+class TombstoneTest(unittest.IsolatedAsyncioTestCase):
+    """墓碑表：容量/TTL 可配置，四类响应分类计数。"""
+
+    async def test_capacity_eviction_counts_expired(self):
+        """容量驱逐：墓碑被挤出后，迟到的响应计 expired 而非 duplicate。"""
+        ch = SimulatedChannel(latency=(0.001, 0.001), seed=11)
+        c = Client(ch, tombstone_size=1)
+        self.assertEqual(await c.call("a", timeout=1.0), "a")   # rid=1
+        self.assertEqual(await c.call("b", timeout=1.0), "b")   # rid=2, 挤出 rid=1
+        ch.inject({"id": 1, "payload": "a"})   # 墓碑已被容量驱逐
+        ch.inject({"id": 2, "payload": "b"})   # 墓碑仍在
+        self.assertEqual(c.stats["expired"], 1)
+        self.assertEqual(c.stats["duplicate"], 1)
+        self.assertEqual(c.stats["unknown"], 0)
+        c.check_consistent()
+
+    async def test_ttl_expiry_counts_expired(self):
+        """TTL 过期：存活期内计 duplicate，过期后计 expired。"""
+        ch = SimulatedChannel(latency=(0.001, 0.001), seed=12)
+        c = Client(ch, tombstone_size=100, tombstone_ttl=0.05)
+        self.assertEqual(await c.call("x", timeout=1.0), "x")   # rid=1
+        ch.inject({"id": 1, "payload": "x"})
+        self.assertEqual(c.stats["duplicate"], 1)
+        await asyncio.sleep(0.08)                # 超过 TTL
+        ch.inject({"id": 1, "payload": "x"})
+        self.assertEqual(c.stats["expired"], 1)
+        self.assertEqual(c.stats["duplicate"], 1)
+        c.check_consistent()
+
+    async def test_unknown_vs_expired_by_id_range(self):
+        """id 大于已发序号 => unknown；id 在已发范围内但墓碑不在 => expired。"""
+        ch = SimulatedChannel(latency=(0.001, 0.001), seed=13)
+        c = Client(ch, tombstone_size=0)         # 不保留任何墓碑
+        self.assertEqual(await c.call("x", timeout=1.0), "x")   # rid=1
+        ch.inject({"id": 1, "payload": "x"})     # 已发范围 => expired
+        ch.inject({"id": 999, "payload": "g"})   # 未发序号 => unknown
+        ch.inject({"id": -3, "payload": "g"})    # 非法 id => unknown
+        self.assertEqual(c.stats["expired"], 1)
+        self.assertEqual(c.stats["unknown"], 2)
+        self.assertEqual(c.stats["duplicate"], 0)
+        self.assertEqual(c.stats["late"], 0)
+        c.check_consistent()
+
+    async def test_late_sub_reasons(self):
+        """迟到响应按子原因分别计数：late_timeout / late_cancelled。"""
+        ch = SimulatedChannel(latency=(0.2, 0.2), seed=14)
+        c = Client(ch)
+        with self.assertRaises(RequestTimeout):
+            await c.call("slow", timeout=0.05)   # rid=1, 超时
+        task = asyncio.create_task(c.call("x", timeout=5.0))  # rid=2
+        await asyncio.sleep(0.02)
+        c.cancel(2)
+        await asyncio.sleep(0.3)                 # 两个迟到响应到达
+        self.assertEqual(c.stats["late"], 2)
+        self.assertEqual(c.stats["late_timeout"], 1)
+        self.assertEqual(c.stats["late_cancelled"], 1)
+        self.assertEqual(c.stats["late_failed"], 0)
+        c.check_consistent()
+
+    async def test_tombstone_memory_bounded(self):
+        """内存上界可复算：实测占用 <= 推导上界，与请求总量无关。"""
+        ch = SimulatedChannel(latency=(0.0, 0.001), seed=15)
+        c = Client(ch, tombstone_size=64)
+        for i in range(500):
+            await c.call(i, timeout=1.0)
+        self.assertLessEqual(len(c._tombstones), 64)
+        self.assertLessEqual(c.tombstone_memory(), c.tombstone_bound())
+        c.check_consistent()
+
+
 if __name__ == "__main__":
     unittest.main()

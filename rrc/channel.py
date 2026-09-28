@@ -38,6 +38,8 @@ class SimulatedChannel:
         self.sent_count = 0
         self.delivered_count = 0
         self.dropped_count = 0
+        self.replayed_count = 0   # 重放产生的额外副本数
+        self.slow_count = 0       # 被注入长尾延迟的响应数
 
     def send(self, msg: dict) -> None:
         """模拟对端 echo 服务：收到请求后异步回送同 id 的响应。"""
@@ -50,6 +52,7 @@ class SimulatedChannel:
         resp = {"id": msg["id"], "payload": msg["payload"]}
         self._schedule(resp)
         if self._rng.random() < self.replay:
+            self.replayed_count += 1
             self._schedule(resp)  # 重放：同一份响应再投递一次
 
     def inject(self, msg: dict) -> None:
@@ -70,7 +73,10 @@ class SimulatedChannel:
                 self.on_connect()
 
     def _schedule(self, resp: dict) -> None:
-        lo_hi = self.slow_latency if self._rng.random() < self.slow else self.latency
+        is_slow = self._rng.random() < self.slow
+        if is_slow:
+            self.slow_count += 1
+        lo_hi = self.slow_latency if is_slow else self.latency
         delay = self._rng.uniform(*lo_hi)
         loop = asyncio.get_running_loop()
         loop.call_later(delay, self._deliver, resp)

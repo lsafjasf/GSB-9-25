@@ -11,8 +11,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import sys
+import time
 from collections import Counter, OrderedDict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 
 from .channel import ChannelDown, SimulatedChannel
 
@@ -50,7 +53,33 @@ _STATS_BY_OUTCOME = {
 }
 
 
+def _deep_sizeof(obj: Any, _seen: Optional[Set[int]] = None) -> int:
+    """递归深层字节数；同一对象只计一次（共享的 outcome 常量字符串不重复计费）。"""
+    if _seen is None:
+        _seen = set()
+    oid = id(obj)
+    if oid in _seen:
+        return 0
+    _seen.add(oid)
+    size = sys.getsizeof(obj)
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            size += _deep_sizeof(key, _seen) + _deep_sizeof(value, _seen)
+    elif isinstance(obj, (tuple, list, set, frozenset)):
+        for item in obj:
+            size += _deep_sizeof(item, _seen)
+    return size
+
+
 class Client:
+    """请求响应关联客户端。
+
+    墓碑表（tombstone）记录最近完结请求的终态，用于把未配对的响应分类为：
+    duplicate（重复）/ late（迟到）/ expired（墓碑已过期或被驱逐）/ unknown（未知 id）。
+    容量 tombstone_size 与存活时间 tombstone_ttl 均可配置，内存占用有界：
+    条目数 <= min(tombstone_size, 吞吐 x tombstone_ttl)，与请求总量无关。
+    """
+
     def __init__(
         self,
         channel: SimulatedChannel,
@@ -60,18 +89,22 @@ class Client:
         on_disconnect: str = "fail",
         default_timeout: float = 5.0,
         tombstone_size: int = 4096,
+        tombstone_ttl: Optional[float] = None,
     ) -> None:
         assert on_full in ("fail", "queue")
         assert on_disconnect in ("fail", "retry")
+        assert tombstone_size >= 0
+        assert tombstone_ttl is None or tombstone_ttl > 0
         self.channel = channel
         self.on_full = on_full
         self.on_disconnect = on_disconnect
         self.default_timeout = default_timeout
         self.tombstone_size = tombstone_size
+        self.tombstone_ttl = tombstone_ttl
 
         self._pending: Dict[int, _Entry] = {}
-        # 有界墓碑表：记录最近完结请求的终态，用于区分 重复/迟到/未知
-        self._tombstones: "OrderedDict[int, str]" = OrderedDict()
+        # 有界墓碑表：rid -> (终态, 过期时刻)。容量与 TTL 双重约束，懒惰驱逐。
+        self._tombstones: "OrderedDict[int, Tuple[str, float]]" = OrderedDict()
         self._slots = asyncio.Semaphore(max_inflight)
         self._seq = 0
         self.stats: Counter = Counter()
@@ -114,6 +147,35 @@ class Client:
         assert done == s["submitted"], f"stats inconsistent: {done} != {s['submitted']}"
         assert not self._pending, f"{len(self._pending)} dangling entries"
         assert len(self._tombstones) <= self.tombstone_size
+
+    def tombstone_memory(self) -> int:
+        """实测墓碑表当前占用的深层字节数（共享字符串只计一次）。"""
+        return _deep_sizeof(self._tombstones)
+
+    @staticmethod
+    def tombstone_entry_cost() -> int:
+        """实测单条墓碑的深层字节数（当前解释器），用于内存上界推导。"""
+        probe: "OrderedDict[int, Tuple[str, float]]" = OrderedDict()
+        base = _deep_sizeof(probe)
+        for i in range(1, 1001):
+            probe[i] = ("timeout", float(i))
+        return (_deep_sizeof(probe) - base) // 1000
+
+    def tombstone_bound(self, rate: Optional[float] = None) -> int:
+        """墓碑表内存上界（字节）推导值。
+
+        条目数 <= min(tombstone_size, ceil(rate x tombstone_ttl))；
+        rate 为吞吐（请求/秒），仅在设置 tombstone_ttl 时收紧上界。
+        推导方法：构造同构探针表实测深层字节数，再乘 2 倍余量——
+        CPython 字典删除不收缩，稳态下 entries 数组至多含等量 dummy 槽位。
+        """
+        entries = self.tombstone_size
+        if self.tombstone_ttl is not None and rate is not None:
+            entries = min(entries, math.ceil(rate * self.tombstone_ttl))
+        probe: "OrderedDict[int, Tuple[str, float]]" = OrderedDict()
+        for i in range(entries):
+            probe[2**30 + i] = ("timeout", math.inf)  # 大 int 键，保守取形
+        return 2 * _deep_sizeof(probe)
 
     # ------------------------------------------------------------- internal
 
@@ -162,9 +224,20 @@ class Client:
         self._drop(rid, "timeout", RequestTimeout(f"request {rid} timed out"))
 
     def _tombstone(self, rid: int, outcome: str) -> None:
-        self._tombstones[rid] = outcome
+        now = time.monotonic()
+        self._evict_expired(now)
+        expires = now + self.tombstone_ttl if self.tombstone_ttl is not None else math.inf
+        self._tombstones[rid] = (outcome, expires)
         self._tombstones.move_to_end(rid)
         while len(self._tombstones) > self.tombstone_size:
+            self._tombstones.popitem(last=False)
+
+    def _evict_expired(self, now: float) -> None:
+        # TTL 恒定 => 过期时刻随插入序单调，从队首扫描即可
+        while self._tombstones:
+            _, expires = next(iter(self._tombstones.values()))
+            if expires > now:
+                break
             self._tombstones.popitem(last=False)
 
     # --------------------------------------------------------- channel hooks
@@ -174,25 +247,30 @@ class Client:
         entry = self._pending.pop(rid, None)
         if entry is not None:
             entry.timer.cancel()
-            self.stats["succeeded"] += 1
-            self._tombstone(rid, "ok")
-            if not entry.future.done():
-                if "error" in msg:
-                    self.stats["succeeded"] -= 1
-                    self.stats["failed"] += 1
-                    self._tombstones[rid] = "failed"
+            if "error" in msg:
+                self.stats["failed"] += 1
+                self._tombstone(rid, "failed")
+                if not entry.future.done():
                     entry.future.set_exception(RequestFailed(str(msg["error"])))
-                else:
+            else:
+                self.stats["succeeded"] += 1
+                self._tombstone(rid, "ok")
+                if not entry.future.done():
                     entry.future.set_result(msg.get("payload"))
             return
-        outcome = self._tombstones.get(rid)
+        self._evict_expired(time.monotonic())
+        tomb = self._tombstones.get(rid)
+        outcome = tomb[0] if tomb is not None else None
         if outcome == "ok":
             self.stats["duplicate"] += 1  # 重复响应（重放）
         elif outcome is not None:
             self.stats["late"] += 1       # 迟到响应（超时/取消/失败之后）
+            self.stats[f"late_{outcome}"] += 1  # 子原因：late_timeout/late_cancelled/late_failed
+        elif isinstance(rid, int) and 0 < rid <= self._seq:
+            self.stats["expired"] += 1    # 过期响应：墓碑已被 TTL/容量驱逐
         else:
             self.stats["unknown"] += 1    # 未知 id
-        # 三种情况一律丢弃，不触碰任何现有状态
+        # 四种情况一律丢弃，不触碰任何现有状态
 
     def _on_disconnect(self) -> None:
         if self.on_disconnect == "fail":
