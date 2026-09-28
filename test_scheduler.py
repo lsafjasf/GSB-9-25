@@ -99,6 +99,17 @@ class TestConflicts(unittest.TestCase):
         self.assertEqual(cs[0].overlap_start, to_abs_minutes(D(2026, 5, 2), 60))
         self.assertEqual(cs[0].overlap_end, to_abs_minutes(D(2026, 5, 2), 120))
 
+    def test_cross_midnight_starting_before_first_query_day(self):
+        # 重复实例从查询首日前一天 22:00 开始、跨午夜到首日 02:00，
+        # 候选日期需向前多展开一天，否则与首日凌晨时段的冲突漏报
+        a = Event("a", rule=RecurrenceRule("daily", D(2026, 5, 1)),
+                  windows=(W(22 * 60, 26 * 60),))
+        b = single("b", D(2026, 5, 2), 1 * 60, 3 * 60)
+        cs = find_conflicts(a, b, D(2026, 5, 2), D(2026, 5, 2))
+        self.assertEqual(len(cs), 1)
+        self.assertEqual(cs[0].overlap_start, to_abs_minutes(D(2026, 5, 2), 60))
+        self.assertEqual(cs[0].overlap_end, to_abs_minutes(D(2026, 5, 2), 120))
+
     def test_recurring_vs_single(self):
         a = Event("standup", rule=RecurrenceRule("daily", D(2026, 1, 1)),
                   windows=(W(9 * 60, 9 * 60 + 30),))
@@ -150,6 +161,21 @@ class TestExceptions(unittest.TestCase):
                   exceptions={D(2026, 5, 1): MovedTo(D(2026, 5, 2))})
         b = single("b", D(2026, 5, 1), 9 * 60, 10 * 60)  # 原日期已让位
         self.assertEqual(find_conflicts(a, b, D(2026, 5, 1), D(2026, 5, 3)), [])
+
+    def test_moved_exception_query_starts_on_new_date(self):
+        # 查询区间正好从改期后的新日期开始：原日期（首日前一天）必须纳入候选，
+        # 否则改期实例取不到、与新日期日程的真实冲突被放行
+        a = Event("a", rule=RecurrenceRule("daily", D(2026, 5, 1), end_date=D(2026, 5, 1)),
+                  windows=(W(9 * 60, 10 * 60),),
+                  exceptions={D(2026, 5, 1): MovedTo(D(2026, 5, 2))})
+        b = single("b", D(2026, 5, 2), 9 * 60 + 30, 11 * 60)
+        cs = find_conflicts(a, b, D(2026, 5, 2), D(2026, 5, 2))
+        self.assertEqual(len(cs), 1)
+        inst = cs[0].a if cs[0].a.event_id == "a" else cs[0].b
+        self.assertEqual(inst.moved_from, D(2026, 5, 1))
+        self.assertEqual(inst.date, D(2026, 5, 2))
+        self.assertEqual(cs[0].overlap_start, to_abs_minutes(D(2026, 5, 2), 570))
+        self.assertEqual(cs[0].overlap_end, to_abs_minutes(D(2026, 5, 2), 600))
 
 
 class TestCalendar(unittest.TestCase):

@@ -50,6 +50,12 @@
 （哪天、哪一时段、是否改期）。`Calendar.insert()` 插入前强制检测，
 冲突时抛 `ConflictError` 且不入库。相邻不重叠（10:00 结束 vs 10:00 开始）不算冲突。
 
+展开重复规则时，候选日期会比查询区间**向前多取一天**再由绝对时间区间过滤：
+否则两类真实冲突会漏报——改期例外把实例搬到查询首日（原日期在区间外、候选取不到），
+以及跨午夜实例从前一日开始、延续到查询区间内。对应测试见
+`TestExceptions.test_moved_exception_query_starts_on_new_date` 与
+`TestConflicts.test_cross_midnight_starting_before_first_query_day`。
+
 ### 输出样例（`python3 demo.py`）
 
 ```
@@ -79,11 +85,12 @@
 ## 运行命令
 
 ```bash
-python3 -m unittest test_scheduler -v   # 自测（22 个用例）
+python3 -m unittest test_scheduler -v   # 自测（24 个用例）
 python3 demo.py                          # 冲突实例输出样例
 python3 benchmark.py                     # 规模基准
 ```
 
 覆盖的边界情形（均有对应测试）：相邻不重叠、跨午夜、同一天多实例、
-长时间范围展开（100 年每日 = 36525 天计数校验）、月末 skip/clamp、
-闰年/平年 2 月、例外跳过、例外改期及其引发的新冲突。
+跨午夜实例始于查询首日前一天、长时间范围展开（100 年每日 = 36525 天计数校验）、
+月末 skip/clamp、闰年/平年 2 月、例外跳过、例外改期及其引发的新冲突
+（含查询区间从改期后新日期开始的情形）。

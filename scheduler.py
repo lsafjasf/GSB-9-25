@@ -239,8 +239,14 @@ def expand_event(ev: Event, range_start: date, range_end: date) -> list[Instance
     if ev.rule is None:
         candidates = [ev.single_date]
     else:
-        # 改期可能把实例移出原日期，多展开一天缓冲由范围过滤兜底
-        candidates = iter_rule_dates(ev.rule, range_start, range_end)
+        # 边界缓冲：规则候选需多取首日前一天的命中——
+        # 一是改期例外可能把实例搬到查询首日（原日期在区间外），
+        # 二是跨午夜实例可能从前一日开始、延续到查询区间内。
+        # 多取的候选由上面的绝对时间区间过滤兜底，不会进入结果。
+        buffered_start = (
+            range_start - timedelta(days=1) if range_start > date.min else date.min
+        )
+        candidates = iter_rule_dates(ev.rule, buffered_start, range_end)
 
     for d in candidates:
         if d in ev.exceptions:
