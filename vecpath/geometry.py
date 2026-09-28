@@ -158,3 +158,105 @@ def path_length(segments: List[Segment], tol: float = 1e-6) -> Tuple[float, floa
         total += l
         err += e
     return total, err
+
+
+# ---------- 细分 ----------
+
+def _lerp(a: Point, b: Point, t: float) -> Point:
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+
+def split_segment(seg: Segment, t: float) -> Tuple[Segment, Segment]:
+    """在参数 t ∈ [0,1] 处把段分成左右两段 (de Casteljau 分割)。
+
+    左段对应原参数区间 [0,t], 右段对应 [t,1], 两段均为原曲线的精确子段
+    (不引入近似)。Z 段按等价直线处理, 返回的两段 kind 均为 'L'。
+    """
+    if not 0.0 <= t <= 1.0:
+        raise ValueError(f"细分参数超出 [0,1]: {t}")
+    if seg.kind == "M":
+        raise ValueError("M 段没有几何延展, 不可细分")
+    if seg.kind in ("L", "Z"):
+        p0, p1 = seg.points
+        m = _lerp(p0, p1, t)
+        return Segment("L", (p0, m)), Segment("L", (m, p1))
+    if seg.kind == "Q":
+        p0, p1, p2 = seg.points
+        a, b = _lerp(p0, p1, t), _lerp(p1, p2, t)
+        m = _lerp(a, b, t)
+        return Segment("Q", (p0, a, m)), Segment("Q", (m, b, p2))
+    if seg.kind == "C":
+        p0, p1, p2, p3 = seg.points
+        a, b, c = _lerp(p0, p1, t), _lerp(p1, p2, t), _lerp(p2, p3, t)
+        d, e = _lerp(a, b, t), _lerp(b, c, t)
+        m = _lerp(d, e, t)
+        return Segment("C", (p0, a, d, m)), Segment("C", (m, e, c, p3))
+    raise ValueError(f"未知段类型: {seg.kind!r}")
+
+
+# ---------- 弧长参数化 ----------
+
+def _partial_length(seg: Segment, t: float, tol: float) -> Tuple[float, float]:
+    """段上参数区间 [0,t] 部分的弧长, 返回 (估值, 误差上界)。"""
+    if t <= 0.0:
+        return 0.0, 0.0
+    if t >= 1.0:
+        return segment_length(seg, tol)
+    left, _ = split_segment(seg, t)
+    return segment_length(left, tol)
+
+
+def _locate_in_segment(seg: Segment, local: float, seg_len: float,
+                       tol: float) -> Tuple[float, float]:
+    """段内按弧长定位, 返回 (参数 t, 弧长残差上界)。
+
+    曲线段利用"部分弧长关于 t 单调不减"做二分, 直线段直接按比例。
+    """
+    if seg.kind == "M" or seg_len == 0.0:
+        return 0.0, 0.0
+    if seg.kind in ("L", "Z"):
+        return local / seg_len, 0.0
+    if local <= 0.0:
+        return 0.0, 0.0
+    if local >= seg_len:
+        return 1.0, 0.0
+    lo, hi = 0.0, 1.0
+    lo_len, hi_len = 0.0, seg_len
+    perr = 0.0  # 二分过程中部分弧长估值的最大报告误差
+    for _ in range(60):
+        if hi_len - lo_len <= tol:
+            break
+        mid = (lo + hi) * 0.5
+        ml, me = _partial_length(seg, mid, tol)
+        perr = max(perr, me)
+        if ml < local:
+            lo, lo_len = mid, ml
+        else:
+            hi, hi_len = mid, ml
+    return (lo + hi) * 0.5, (hi_len - lo_len) * 0.5 + perr
+
+
+def point_at_length(segments: List[Segment], s: float,
+                    tol: float = 1e-6) -> Tuple[Point, float]:
+    """按弧长定位: 返回距路径起点弧长 s 处的点与弧长误差上界 (point, err)。
+
+    err 为严格上界: 各段长度估值误差 (逐段报告界累加) 与段内二分定位
+    残差之和, 即返回点的真实弧长与 s 之差不超过 err。
+    s 超出 [0, 总长 ± 总长误差] 时抛 ValueError。
+    """
+    if not segments:
+        raise ValueError("空路径没有弧长定位点")
+    total, terr = path_length(segments, tol)
+    if s < -terr or s > total + terr:
+        raise ValueError(f"s={s} 超出路径弧长范围 [0, {total} ± {terr}]")
+    s = min(max(s, 0.0), total)
+    acc = 0.0
+    last = len(segments) - 1
+    for idx, seg in enumerate(segments):
+        seg_len, _ = segment_length(seg, tol)
+        if s <= acc + seg_len or idx == last:
+            local = min(max(s - acc, 0.0), seg_len)
+            t, resid = _locate_in_segment(seg, local, seg_len, tol)
+            return point_at(seg, t), terr + resid
+        acc += seg_len
+    raise AssertionError("不可达: 前面已按总长夹紧 s")

@@ -4,6 +4,7 @@ import unittest
 from vecpath import (
     Segment, parse, point_at, segment_bbox, path_bbox,
     segment_length, path_length,
+    split_segment, point_at_length, clip_path, to_path_data,
 )
 
 
@@ -224,6 +225,193 @@ class TestDegenerate(unittest.TestCase):
         self.assertAlmostEqual(bb[3] - ba[3], 50.0)
         la, lb = path_length(a)[0], path_length(b)[0]
         self.assertAlmostEqual(la, lb)
+
+
+class TestSplit(unittest.TestCase):
+    def test_split_line(self):
+        (seg,) = parse("M 0 0 L 10 0")[1:]
+        left, right = split_segment(seg, 0.3)
+        self.assertEqual(left.points, ((0.0, 0.0), (3.0, 0.0)))
+        self.assertEqual(right.points, ((3.0, 0.0), (10.0, 0.0)))
+
+    def test_split_point_consistency(self):
+        # 分割点必须等于原曲线在该参数处的点
+        for d in ("M 1 2 Q 3 8 7 -4", "M 1 2 C 3 8 5 -6 7 4"):
+            seg = parse(d)[1]
+            for t in (0.0, 0.25, 0.5, 0.9, 1.0):
+                left, right = split_segment(seg, t)
+                p = point_at(seg, t)
+                self.assertAlmostEqual(left.points[-1][0], p[0])
+                self.assertAlmostEqual(left.points[-1][1], p[1])
+                self.assertAlmostEqual(right.points[0][0], p[0])
+                self.assertAlmostEqual(right.points[0][1], p[1])
+
+    def test_split_length_additive(self):
+        # 左右两段长度之和 = 原段长度 (精确子段, 不引入近似)
+        seg = parse("M 0 0 C 3 7 8 -4 12 5")[1]
+        total, terr = segment_length(seg, tol=1e-9)
+        left, right = split_segment(seg, 0.4)
+        ll, le = segment_length(left, tol=1e-9)
+        rl, re = segment_length(right, tol=1e-9)
+        self.assertAlmostEqual(ll + rl, total, delta=terr + le + re + 1e-9)
+
+    def test_split_invalid(self):
+        with self.assertRaises(ValueError):
+            split_segment(parse("M 1 1")[0], 0.5)  # M 不可细分
+        with self.assertRaises(ValueError):
+            split_segment(parse("M 0 0 L 1 1")[1], 1.5)
+
+
+class TestClipPath(unittest.TestCase):
+    def test_line_clipped(self):
+        segs = parse("M -10 0 L 10 0")
+        clipped = clip_path(segs, (-5, -5, 5, 5))
+        self.assertEqual([s.kind for s in clipped], ["M", "L"])
+        self.assertEqual(clipped[0].points, ((-5.0, 0.0),))
+        self.assertEqual(clipped[1].points, ((-5.0, 0.0), (5.0, 0.0)))
+
+    def test_fully_inside_unchanged(self):
+        segs = parse("M 1 1 L 2 2 Q 3 4 4 2 C 5 0 6 0 7 2")
+        clipped = clip_path(segs, (0, 0, 10, 10))
+        self.assertEqual(clipped, segs)
+
+    def test_fully_outside_empty(self):
+        segs = parse("M 100 100 C 110 120 120 80 130 100")
+        self.assertEqual(clip_path(segs, (0, 0, 10, 10)), [])
+
+    def test_curve_bbox_inside_rect(self):
+        # 裁剪后包围盒 ⊆ 矩形 ∩ 原包围盒
+        segs = parse("M 0 0 C 0 3 1 -3 1 0 S 2 -3 2 0 Q 5 5 8 0 L 12 0 Z")
+        rect = (0.5, -1.0, 6.0, 1.5)
+        clipped = clip_path(segs, rect)
+        box, obox = path_bbox(clipped), path_bbox(segs)
+        eps = 1e-9
+        self.assertGreaterEqual(box[0], rect[0] - eps)
+        self.assertGreaterEqual(box[1], rect[1] - eps)
+        self.assertLessEqual(box[2], rect[2] + eps)
+        self.assertLessEqual(box[3], rect[3] + eps)
+        self.assertGreaterEqual(box[0], obox[0] - eps)
+        self.assertGreaterEqual(box[1], obox[1] - eps)
+        self.assertLessEqual(box[2], obox[2] + eps)
+        self.assertLessEqual(box[3], obox[3] + eps)
+
+    def test_length_not_increased(self):
+        segs = parse("M 0 0 C 0 3 1 -3 1 0 S 2 -3 2 0 Q 5 5 8 0 L 12 0 Z")
+        clipped = clip_path(segs, (0.5, -1.0, 6.0, 1.5))
+        lo, eo = path_length(segs, tol=1e-6)
+        lc, ec = path_length(clipped, tol=1e-6)
+        self.assertLessEqual(lc, lo + eo + ec)
+
+    def test_roundtrip_reparseable(self):
+        # 裁剪结果序列化后必须能被重新解析且完全一致
+        segs = parse("m 3 4 c 1 2 3 -4 5 0 q 2 6 4 0 l -1 -1 z")
+        clipped = clip_path(segs, (2.5, 3.0, 9.0, 6.5))
+        self.assertEqual(parse(to_path_data(clipped)), clipped)
+
+    def test_z_treated_as_line(self):
+        # 闭合段按回到起点的直线参与裁剪
+        segs = parse("M 0 0 L 4 0 Z")
+        clipped = clip_path(segs, (1, -1, 3, 1))
+        kinds = [s.kind for s in clipped]
+        self.assertNotIn("Z", kinds)
+        length, _ = path_length(clipped)
+        self.assertAlmostEqual(length, 4.0)  # 去程回程各截出长度 2
+
+    def test_multi_piece_gets_moveto(self):
+        # 一条曲线两次穿过矩形 -> 两个片段, 之间必须有 M
+        segs = parse("M 0 0 C 3 0 -1 10 2 10")  # 进出再进入
+        clipped = clip_path(segs, (0, -1, 1.5, 1))
+        kinds = [s.kind for s in clipped]
+        self.assertGreaterEqual(kinds.count("M"), 1)
+        self.assertEqual(kinds[0], "M")
+
+    def test_invalid_rect(self):
+        with self.assertRaises(ValueError):
+            clip_path(parse("M 0 0 L 1 1"), (5, 0, 0, 5))
+
+
+class TestToPathData(unittest.TestCase):
+    def test_roundtrip_full_path(self):
+        d = "M 0 0 C 0 1 1 1 1 0 Q 2 -1 3 0 Z M 5 5 L 6 6 T 8 8 S 9 9 10 10"
+        segs = parse(d)
+        self.assertEqual(parse(to_path_data(segs)), segs)
+
+    def test_roundtrip_relative_and_compact(self):
+        segs = parse("m1-2l.5.25e1 c 1 2 3 -4 5 0 q 2 6 4 0 z")
+        self.assertEqual(parse(to_path_data(segs)), segs)
+
+    def test_empty(self):
+        self.assertEqual(to_path_data([]), "")
+        self.assertEqual(parse(to_path_data([])), [])
+
+
+class TestPointAtLength(unittest.TestCase):
+    def test_line_exact(self):
+        segs = parse("M 0 0 L 10 0 L 10 10")
+        pt, err = point_at_length(segs, 5.0)
+        self.assertEqual(pt, (5.0, 0.0))
+        self.assertEqual(err, 0.0)
+        # 跨段定位
+        pt, _ = point_at_length(segs, 15.0)
+        self.assertEqual(pt, (10.0, 5.0))
+
+    def test_endpoints(self):
+        segs = parse("M 1 2 C 3 8 5 -6 7 4")
+        total, _ = path_length(segs)
+        p0, _ = point_at_length(segs, 0.0)
+        p1, _ = point_at_length(segs, total)
+        self.assertEqual(p0, (1.0, 2.0))
+        self.assertAlmostEqual(p1[0], 7.0)
+        self.assertAlmostEqual(p1[1], 4.0)
+
+    def test_out_of_range(self):
+        segs = parse("M 0 0 L 3 4")
+        with self.assertRaises(ValueError):
+            point_at_length(segs, -1.0)
+        with self.assertRaises(ValueError):
+            point_at_length(segs, 6.0)
+        with self.assertRaises(ValueError):
+            point_at_length([], 0.0)
+
+    def test_curve_consistency_with_sampling(self):
+        # 弧长定位点与密集采样 (弦长累加 + 线性插值) 的参考点一致,
+        # 偏差不超过 报告误差界 + 采样间距
+        segs = parse("M 0 0 C 3 7 8 -4 12 5 Q 15 9 20 2 C 25 -5 30 8 35 0")
+        total, terr = path_length(segs, tol=1e-8)
+        n = 4000
+        cum, pts, gap = [0.0], [], 0.0
+        for seg in segs:
+            if seg.kind == "M":
+                pts.append(seg.points[0])
+                continue
+            prev = seg.points[0]
+            for i in range(1, n + 1):
+                p = point_at(seg, i / n)
+                step = math.hypot(p[0] - prev[0], p[1] - prev[1])
+                gap = max(gap, step)
+                cum.append(cum[-1] + step)
+                pts.append(p)
+                prev = p
+        for k in range(1, 20):
+            s = total * k / 20
+            pt, err = point_at_length(segs, s, tol=1e-8)
+            # 参考点: 采样弦长序列上按弧长插值
+            j = 0
+            while j + 1 < len(cum) and cum[j + 1] < s:
+                j += 1
+            span = cum[j + 1] - cum[j]
+            r = 0.0 if span == 0.0 else (s - cum[j]) / span
+            ref = (pts[j][0] + (pts[j + 1][0] - pts[j][0]) * r,
+                   pts[j][1] + (pts[j + 1][1] - pts[j][1]) * r)
+            dev = math.hypot(pt[0] - ref[0], pt[1] - ref[1])
+            self.assertLessEqual(dev, err + gap + 1e-9)
+
+    def test_error_bound_shrinks_with_tol(self):
+        segs = parse("M 0 0 C 3 7 8 -4 12 5")
+        total, _ = path_length(segs, tol=1e-6)
+        _, e1 = point_at_length(segs, total / 2, tol=1e-3)
+        _, e2 = point_at_length(segs, total / 2, tol=1e-8)
+        self.assertLess(e2, e1)
 
 
 if __name__ == "__main__":

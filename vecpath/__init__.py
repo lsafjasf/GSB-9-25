@@ -7,7 +7,10 @@ from .geometry import (
     path_bbox,
     segment_length,
     path_length,
+    split_segment,
+    point_at_length,
 )
+from .clip import clip_path, to_path_data
 
 __all__ = [
     "Segment",
@@ -17,4 +20,8 @@ __all__ = [
     "path_bbox",
     "segment_length",
     "path_length",
+    "split_segment",
+    "point_at_length",
+    "clip_path",
+    "to_path_data",
 ]
