@@ -7,11 +7,14 @@
 
 - `feature_flags.py` — 库源码（编译、求值、快照、存储）
 - `selftest.py` — 自测 + 分桶分布统计 + 十万次求值基准
+- `demo_migration.py` — 跨环境导出→导入→版本对比→阶梯放量端到端演示
+- `selftest_output.log` / `demo_output.log` — 上述两个脚本的真实运行输出
 
 ## 运行
 
 ```bash
-python3 selftest.py        # 运行全部 15 项自测与基准
+python3 selftest.py        # 运行全部 53 项自测与基准
+python3 demo_migration.py  # 跨环境搬运 + 版本对比 + 阶梯灰度演示
 python3 -c "import feature_flags"   # 仅导入库
 ```
 
@@ -89,8 +92,77 @@ store.update(new_config)         # 原子替换；snap 仍看到旧配置，不�
 | `percentage=0` | 永不命中（短路，不计算哈希） |
 | `percentage=100` | 恒命中（短路，无需 `user_id`） |
 | `percentage` 越界 | 编译期抛 `ValueError`（明确失败） |
+| `rollout` 比例越界 / 时间不递增 / 比例回退 | 编译期抛 `ValueError`（阶梯配置被拒绝） |
+| 规则同时声明 `percentage` 与 `rollout` | 编译期抛 `ValueError` |
+| 规则集包 `format` 不支持 / JSON 非法 / 编译不过 | 导入期抛 `ValueError`（拒绝上线） |
 | 非法时间窗口（start ≥ end） | 规则永不生效，编译期记入 `warnings`，求值轨迹留痕 |
 | 灰度规则但无 `user_id` | 灰度规则视为未命中，回落下一层 |
+
+## 规则集导入导出（跨环境搬运）
+
+```python
+from feature_flags import export_bundle, export_json, import_bundle
+
+bundle = export_bundle(config, version="v2", source_env="staging")  # dict
+payload = export_json(config, version="v2", source_env="staging")   # JSON 字符串
+config2, meta = import_bundle(payload)   # 接受 JSON 字符串/bytes/dict/裸 config
+store.update(config2)                    # 原子上线
+```
+
+- 包格式：`{"format": "feature-flags/ruleset/v1", "config": {...},
+  "meta": {"version", "source_env", "exported_at", "flag_count"}}`。
+- **导出前先编译校验**，坏配置不出门；**导入时再次编译**，坏配置不进门：
+  越界比例、非法阶梯、坏 JSON、不支持的 `format` 一律抛 `ValueError`。
+- JSON 往返无损：`import_bundle(export_json(cfg))[0] == cfg`（自测断言）。
+
+## 版本差异对比
+
+`diff_configs(old, new)` 逐条列出两版本差异，接受裸 config 或导出包：
+
+```
+新增（2）：
+  + flag 'dark_mode'：0 条规则，default=False
+  + flag 'new_checkout' 规则 'vip-early'：5%
+删除（1）：
+  - flag 'legacy_pay'：0 条规则，default=True
+参数变化（5）：
+  ~ flag 'new_checkout' [rule:gray] order: 0 -> 1
+  ~ flag 'new_checkout' [rule:gray] percentage: 10% -> （无，使用 rollout 阶梯）
+  ~ flag 'new_checkout' [rule:gray] rollout: （无） -> [2026-10-01T00:00:00Z@0%, ...]
+  ~ flag 'new_checkout' [rule:gray] window_end: '2026-12-31T23:59:59Z' -> None
+  ~ flag 'new_checkout' [rule:gray] window_start: '2026-09-01T00:00:00Z' -> None
+```
+
+- flag 以 key、规则以 `(flag, rule id)` 为身份；参数变化覆盖 `default`、
+  `env` 覆盖值、规则的 `value/percentage/rollout/时间窗口` 与定义顺序。
+- 返回 `ConfigDiff(added, removed, changed)`，条目按
+  `(flag, scope, param)` 排序；`.empty / .total / .report()` 可直接断言，
+  相同输入结论逐字节确定（自测连续 20 次对比报告完全一致）。
+
+## 时间阶梯灰度（自动按时间抬比例）
+
+规则可用 `rollout` 声明 `(time, percentage)` 档序列，替代静态 `percentage`
+（二者互斥）：
+
+```python
+{"id": "gray", "value": True, "rollout": [
+    {"time": "2026-10-01T00:00:00Z", "percentage": 0},
+    {"time": "2026-10-02T00:00:00Z", "percentage": 10},
+    {"time": "2026-10-04T00:00:00Z", "percentage": 50},
+    {"time": "2026-10-08T00:00:00Z", "percentage": 100},
+]}
+```
+
+- 求值时刻落在哪个档，就用该档比例解析分桶阈值；首档时间之前规则不生效。
+  `snapshot.rollout_plan(flag, rule_id)` 返回当前档位、各档时间/比例/阈值。
+- **越界配置编译期即被拒绝**（`ValueError`）：比例不在 `[0,100]`、
+  时间不严格递增、比例回退（连万分桶精度内的实质回退，如
+  `0.001% -> 0.0009%`，也拒绝）；允许持平形成 plateau。
+- **分桶稳定、放量只扩不缩**：bucket 仍由 `(salt, flag, user)` 决定，
+  与时间、进程、版本无关；阈值单调抬高意味着上一档已放量的用户
+  在下一档必然仍放量。自测中 20000 用户跨 0%/10%/50%/100% 四档，
+  放量集合逐档包含、bucket 跨实例完全一致、单个用户至多翻转一次。
+  实测放量：0.00% → 10.08% → 50.03% → 100.00%（偏差 < 0.1pp）。
 
 ## 性能（十万次求值，本机 Python 3.12）
 

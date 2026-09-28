@@ -1,0 +1,97 @@
+[PASS] rule 层命中且给出规则链
+[PASS] 无 user_id 时灰度不命中，回落 default
+[PASS] env 覆盖优先于 default
+[PASS] 缺失开关返回 fallback 并留痕
+---- 规则链示例 ----
+flag=new_checkout value=True layer=rule
+  - user='u-1' 分桶 bucket=223/10000
+  - rule 'gray-25': 命中 -> value=True
+
+---- 分桶分布（100000 个用户，万分桶）----
+    目标比例       实际命中     偏差(pp)
+      1%      1.02%     +0.02
+     10%     10.08%     +0.08
+     25%     25.01%     +0.01
+     50%     50.10%     +0.10
+     75%     75.09%     +0.09
+     90%     89.90%     -0.10
+     99%     99.02%     +0.02
+[PASS] 各比例实际命中偏差 < 1 个百分点  max=0.10pp
+[PASS] 分桶稳定：跨实例 500 个用户结果完全一致
+[PASS] 快照隔离：update 后旧快照仍看到旧配置
+[PASS] 并发安全：8 读 + 1 写 1s 内无不一致读取  errors=0
+[PASS] 同优先级冲突：先定义者胜且留痕
+[PASS] 非法时间窗口：规则永不生效并留痕
+[PASS] percentage=0 永不命中
+[PASS] percentage=100 恒命中（无需 user_id）
+[PASS] percentage 越界抛 ValueError
+[PASS] 时间窗口生效：窗口内 True / 窗口外 False
+
+---- 十万次求值耗时（20 个开关 x 1 万用户）----
+冷缓存（首次，含 sha1 分桶）: 0.151s  1.51us/次
+热缓存（分桶命中缓存）      : 0.138s  1.38us/次
+[PASS] 十万次求值完成且热缓存不慢于冷缓存
+[PASS] 导出包带 format 与 meta
+[PASS] JSON 往返：导入配置与原配置完全一致
+[PASS] 导入 meta 保留版本与来源环境
+[PASS] 跨环境搬运后 500 用户求值结果一致
+[PASS] 导入接受裸 config 与 JSON 字符串
+[PASS] 非法包被拒收（format 不支持）
+[PASS] 非法包被拒收（JSON 非法）
+[PASS] 非法包被拒收（config 非对象）
+[PASS] 非法包被拒收（阶梯比例越界）
+
+---- 版本差异 v1 -> v2 ----
+新增（2）：
+  + flag 'dark_mode'：0 条规则，default=False
+  + flag 'new_checkout' 规则 'vip'：100%
+删除（1）：
+  - flag 'old_search'：0 条规则，default=True
+参数变化（3）：
+  ~ flag 'new_checkout' [env:prod] value: （无） -> False
+  ~ flag 'new_checkout' [flag] default: False -> True
+  ~ flag 'new_checkout' [rule:gray] percentage: 10% -> 50%
+[PASS] 新增 flag 逐条：dark_mode
+[PASS] 新增规则逐条：vip
+[PASS] 删除 flag 逐条：old_search
+[PASS] 参数变化：default False -> True
+[PASS] 参数变化：灰度比例 10% -> 50%
+[PASS] 参数变化：新增 env=prod 覆盖
+[PASS] 结论可断言：1 新增 flag + 1 新增规则 + 1 删除 flag + 3 参数变化
+[PASS] 反向对比：增删对调
+[PASS] 相同版本无差异
+[PASS] 结论确定：20 次对比报告完全一致
+[PASS] 静态比例 -> 时间阶梯：percentage 与 rollout 两条参数变化
+
+---- 时间阶梯放量（20000 用户，万分桶）----
+          日期     档位      比例       实际放量       新增用户
+10-01         0      0%      0.00%          0
+[PASS] 第 0%（未放量） 档生效（day=0）
+[PASS] 档位单调：上一档用户不被收回（day=0）
+10-02         1     10%     10.08%       2017
+[PASS] 第 10% 档生效（day=1）
+[PASS] 档位单调：上一档用户不被收回（day=1）
+10-04         2     50%     50.03%       7990
+[PASS] 第 50% 档生效（day=3）
+[PASS] 档位单调：上一档用户不被收回（day=3）
+10-08         3    100%    100.00%       9993
+[PASS] 第 100% 全量 档生效（day=7）
+[PASS] 档位单调：上一档用户不被收回（day=7）
+10-10         3    100%    100.00%          0
+[PASS] 第 100% 全量（窗口后保持） 档生效（day=9）
+[PASS] 档位单调：上一档用户不被收回（day=9）
+[PASS] 中间档实际放量偏差 < 1 个百分点  max=0.08pp
+[PASS] 最终档全量；首档前为空
+[PASS] 分桶稳定：跨档位、跨快照、跨 store 实例 1000 用户 bucket 完全一致
+[PASS] 单个用户阶梯推进中至多翻转一次（user-0: [False, True, True, True, True, True, True, True, True, True]）
+---- 阶梯求值轨迹示例 ----
+flag=new_payment value=True layer=rule
+  - user='user-0' 分桶 bucket=318/10000
+  - rule 'staged': 阶梯灰度处于第 2 档（2026-10-04T00:00:00Z 起 50.0%，threshold=5000）
+  - rule 'staged': 命中 -> value=True
+[PASS] 阶梯越界配置被拒绝（比例 >100）
+[PASS] 阶梯越界配置被拒绝（比例 <0）
+[PASS] 阶梯越界配置被拒绝（时间倒序）
+[PASS] 阶梯越界配置被拒绝（比例回退）
+
+==== 53/53 项通过 ====
