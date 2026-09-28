@@ -5,7 +5,7 @@
 ## 文件
 
 - `streampipe.py` — 库源码（末尾附 `__main__` 演示）
-- `test_streampipe.py` — 自测（unittest，13 个用例）
+- `test_streampipe.py` — 自测（unittest，15 个用例）
 
 ## 运行命令
 
@@ -43,8 +43,10 @@ python3 streampipe.py             # 运行演示，打印统计输出样例
 ### 错误传播
 
 任一阶段抛异常 → 记录错误 → 关闭全部缓冲 → **丢弃**所有已缓冲数据（计入
-`dropped`，不静默吞掉）→ 消费者迭代器抛 `PipelineError`（`__cause__` 链接原始异常）
+`dropped`，不静默吞掉）→ 消费者迭代器**原样抛出该异常**（类型与消息不变，
+调用方可直接 `except ValueError` 等具体类型，无需再翻 `__cause__`）
 → 生产者后续 `put` 抛 `ClosedError`。已交付给消费者的结果保持有效。
+仅 `abort()` 中止路径抛 `PipelineError`。
 
 ### 关闭语义
 
@@ -52,6 +54,9 @@ python3 streampipe.py             # 运行演示，打印统计输出样例
   消费者能读到剩余全部数据。
 - `abort()`：立即终止（消费者异常时由 `with` 语句自动调用），幂等。丢弃全部
   缓冲数据（计入 `dropped`），`put` 抛 `ClosedError`，消费者迭代抛 `PipelineError`。
+- 放弃迭代：消费者直接关闭 `results()` 生成器（如 `break` 后对象被回收，
+  未走上下文管理也未调用 `close/abort`）等价于 `abort()`——阻塞在满缓冲上的
+  生产者和所有阶段线程会被立即解除并退出，不会永久卡死。
 
 ## 覆盖的场景（对应测试）
 
@@ -59,7 +64,8 @@ python3 streampipe.py             # 运行演示，打印统计输出样例
 - 消费者异常：`test_consumer_exception_aborts_via_context_manager`
 - 上游提前关闭：`test_graceful_close_drains_remaining`
 - 生产者在背压期间被取消：`test_put_cancelled_during_backpressure`、`test_put_timeout_under_backpressure`
-- 阶段抛错传播：`test_stage_error_terminates_pipeline_and_propagates`、`test_first_stage_error_still_propagates`
+- 阶段抛错传播（原始类型直接可见）：`test_stage_error_terminates_pipeline_and_propagates`、`test_first_stage_error_still_propagates`
+- 中途放弃迭代：`test_abandoned_iteration_lets_all_threads_exit`
 - 内存上界：`TestMemoryBound`（快生产者 + 慢消费者 + 丢弃策略）
 - 关闭语义：`TestCloseSemantics`（幂等关闭、关闭后写入失败、剩余数据可读）
 

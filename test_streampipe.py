@@ -167,12 +167,12 @@ class TestErrorPropagation(unittest.TestCase):
         t.start()
 
         received = []
-        with self.assertRaises(PipelineError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             for item in pipe.results():
                 received.append(item)
-        # 原始异常被链接保留，不静默吞掉
-        self.assertIsInstance(ctx.exception.__cause__, ValueError)
-        self.assertIn("exploded", str(ctx.exception.__cause__))
+        # 原始异常原样抛出，类型与消息直接可见，不再包一层 PipelineError
+        self.assertNotIsInstance(ctx.exception, PipelineError)
+        self.assertIn("exploded", str(ctx.exception))
 
         t.join(timeout=5)
         self.assertTrue(pipe.wait(timeout=5))
@@ -192,7 +192,7 @@ class TestErrorPropagation(unittest.TestCase):
         pipe = Pipeline([lambda x: 1 / 0], capacity=2)
         pipe.put(1)
         pipe.close()
-        with self.assertRaises(PipelineError):
+        with self.assertRaises(ZeroDivisionError):
             list(pipe.results())
         self.assertEqual(pipe.stats().failed, 1)
 
@@ -259,6 +259,66 @@ class TestCloseSemantics(unittest.TestCase):
         stats = pipe.stats()
         self.assertTrue(stats.aborted)
         self.assertGreaterEqual(stats.dropped, 0)
+
+
+class TestMinimalRepros(unittest.TestCase):
+    """两个缺陷的最小复现：放弃迭代 / 异常类型被统一包装。"""
+
+    def test_abandoned_iteration_lets_all_threads_exit(self):
+        # 消费者拿到少量结果后直接关掉生成器（不走 with、不调 abort/close）。
+        # capacity=1：所有缓冲都会被填满，生产者与全部阶段线程必然卡死。
+        pipe = Pipeline([lambda x: x, lambda x: x], capacity=1)
+
+        producer_outcome = []
+
+        def producer():
+            try:
+                for i in range(100000):
+                    pipe.put(i)  # 修复前：永远阻塞在这里
+            except ClosedError:
+                producer_outcome.append("closed")  # 中止解除阻塞后收到关闭信号
+
+        t_prod = threading.Thread(target=producer, daemon=True)
+        t_prod.start()
+
+        it = pipe.results()
+        self.assertEqual(next(it), 0)
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if all(not t.is_alive() for t in pipe._threads):
+                break
+            time.sleep(0.01)
+        # 先证明死锁前提成立：两个阶段线程都还活着（全卡在满缓冲上）
+        self.assertTrue(all(t.is_alive() for t in pipe._threads))
+        self.assertTrue(t_prod.is_alive())
+        self.assertEqual(len(pipe._buffers[-1]), 1)
+
+        it.close()  # 消费者中途放弃迭代
+
+        t_prod.join(timeout=2)
+        self.assertFalse(t_prod.is_alive(), "放弃迭代后生产者仍被背压卡死")
+        self.assertEqual(producer_outcome, ["closed"])
+        self.assertTrue(pipe.wait(timeout=2), "放弃迭代后阶段线程未能退出")
+        self.assertTrue(pipe.stats().aborted)
+
+    def test_original_stage_exception_type_is_visible_directly(self):
+        class BoomError(RuntimeError):
+            pass
+
+        original = BoomError("stage exploded")
+
+        def boom(x):
+            raise original
+
+        pipe = Pipeline([boom], capacity=1)
+        pipe.put(1)
+        with self.assertRaises(BoomError) as ctx:
+            list(pipe.results())
+        # 原始异常原样可见，调用方无需再翻 __cause__
+        self.assertIs(ctx.exception, original)
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertTrue(pipe.wait(timeout=5))
 
 
 class TestStatsAndFilter(unittest.TestCase):

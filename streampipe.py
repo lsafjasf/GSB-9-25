@@ -9,13 +9,16 @@
     * ``"drop_oldest"`` 缓冲满时丢弃最旧元素，put 永不阻塞；
     * ``"drop_newest"`` 缓冲满时丢弃新元素，put 返回 False。
 - 错误传播：任一阶段抛出异常 -> 记录错误 -> 关闭全部缓冲 ->
-  丢弃所有已缓冲数据（计入 dropped）-> 消费者迭代器抛出 PipelineError。
-  已交付给消费者的结果保持有效；未交付的一律丢弃，绝不静默吞掉。
+  丢弃所有已缓冲数据（计入 dropped）-> 消费者迭代器原样抛出该异常
+  （类型不变，调用方可直接 except 具体类型）。仅 abort() 中止路径抛
+  PipelineError。已交付给消费者的结果保持有效；未交付的一律丢弃。
 - 关闭语义：
     * ``close()``  优雅关闭：生产者再写入会抛 ClosedError；管道把已缓冲
       数据处理完后，消费者能读到全部剩余数据；重复调用安全（幂等）。
     * ``abort()``  立即终止（用于消费者异常等）：丢弃全部缓冲数据，
       生产者写入抛 ClosedError，消费者迭代抛 PipelineError。
+    * 消费者中途放弃迭代（results() 生成器被 close，例如 break 后被
+      回收）等价于 abort()：阻塞在满缓冲上的生产者/阶段线程全部解除退出。
 
 内存上界推导
 ============
@@ -309,9 +312,12 @@ class Pipeline:
         return True
 
     def abort(self):
-        """立即终止整条管道（幂等）：丢弃全部缓冲数据，写入抛 ClosedError。"""
+        """立即终止整条管道（幂等）：丢弃全部缓冲数据，写入抛 ClosedError。
+
+        已处于失败状态时无需（也不会）重复清理：缓冲已在失败路径关闭。
+        """
         with self._lock:
-            if self._aborted or self._error is not None:
+            if self._aborted:
                 return False
             self._aborted = True
             self._closed = True
@@ -321,17 +327,32 @@ class Pipeline:
     # ---------------------------------------------------------------- 消费者侧
 
     def results(self):
-        """迭代输出。优雅关闭后能读到剩余全部数据；失败/中止时抛 PipelineError。"""
+        """迭代输出。
+
+        - 优雅关闭后能读到剩余全部数据；
+        - 阶段失败时原样抛出阶段抛出的异常（类型不变，可直接 except）；
+        - abort() 中止时抛 PipelineError；
+        - 迭代被中途放弃（生成器被 close，如 break 后回收）时自动中止
+          管道，解除所有阻塞在背压上的生产者与阶段线程。
+        """
         out = self._buffers[-1]
-        while True:
-            item = out.get()
-            if item is _END:
-                break
-            yield item
-        if self._error is not None:
-            raise PipelineError(f"{self.name}: stage failed") from self._error
-        if self._aborted:
-            raise PipelineError(f"{self.name}: pipeline aborted")
+        finished = False
+        try:
+            while True:
+                item = out.get()
+                if item is _END:
+                    break
+                yield item
+            finished = True
+            if self._error is not None:
+                raise self._error
+            if self._aborted:
+                raise PipelineError(f"{self.name}: pipeline aborted")
+        finally:
+            if not finished:
+                # 消费者中途放弃迭代（GeneratorExit / 被回收）：
+                # 立即中止，防止上游线程永久阻塞在满缓冲的 put 上。
+                self.abort()
 
     def __iter__(self):
         return self.results()
