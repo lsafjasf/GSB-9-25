@@ -1,5 +1,6 @@
 """rectpack 约束断言测试。运行：python3 -m unittest test_rectpack -v"""
 
+import importlib
 import random
 import unittest
 
@@ -134,6 +135,25 @@ class TestConstraints(unittest.TestCase):
         rects = random_rects(1000, seed=42, lo=1, hi=25)
         res = pack(200, rects, allow_rotation=True)
         assert_valid_packing(self, res, 1000)
+
+    def test_readme_tables_match_benchmark_output(self):
+        """README 表格的每一行都必须与 benchmark.py 的真实输出对得上。"""
+        benchmark = importlib.import_module("benchmark")
+        rows, records = benchmark.check_readme()
+        # 每个数据集的旋转关闭/开启两档都不能漏（细长条正是在旋转开启时收益最小）
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(
+            [(r.name, r.rotation) for r in rows],
+            [("均匀小矩形", False), ("均匀小矩形", True),
+             ("大小混合", False), ("大小混合", True),
+             ("细长条", False), ("细长条", True),
+             ("均匀中方块", True)])
+        gains = [r.gain_h for r in rows]
+        self.assertAlmostEqual(min(gains), 28.3, places=1)
+        self.assertAlmostEqual(max(gains), 36.5, places=1)
+        self.assertEqual(min(rows, key=lambda r: r.gain_h).name, "细长条")
+        self.assertTrue(min(rows, key=lambda r: r.gain_h).rotation)
+        self.assertEqual(len(records), 4)
 
 
 if __name__ == "__main__":
