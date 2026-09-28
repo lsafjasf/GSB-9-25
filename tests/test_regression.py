@@ -229,6 +229,23 @@ class TestCorruptPayloadError(unittest.TestCase):
         with self.assertRaises(c2.CorruptPayloadError):
             c2.decompress(frame)
 
+    def test_prematurely_ending_deflate_stream_is_rejected(self):
+        # Forged frame whose header fields are all self-consistent
+        # (original_len / payload_len / crc32 match the payload), but the
+        # DEFLATE payload is a single NON-final stored block with no final
+        # block after it: it decodes to exactly the declared length yet the
+        # stream never terminates.  Must not be accepted as success.
+        data = b"premature end, full length"
+        payload = (b"\x00"  # BFINAL=0, BTYPE=00 (stored, non-final)
+                   + len(data).to_bytes(2, "little")
+                   + (0xFFFF - len(data)).to_bytes(2, "little") + data)
+        dec = zlib.decompressobj(-15)
+        self.assertEqual(dec.decompress(payload), data)
+        self.assertFalse(dec.eof)  # stream really does end early
+        frame = _forge(c2.MODE_DEFLATE, payload, len(data))
+        with self.assertRaises(c2.CorruptPayloadError):
+            c2.decompress(frame)
+
     def test_crc_valid_but_decoded_length_mismatch(self):
         frame = _forge(c2.MODE_DEFLATE, _raw_deflate(b"hello"), 99)
         with self.assertRaises(c2.CorruptPayloadError):

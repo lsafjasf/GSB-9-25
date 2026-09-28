@@ -135,8 +135,6 @@ def decompress(blob: bytes) -> bytes:
     flags = blob[4]
     _header_error_if(flags & ~_FLAG_MODE, "reserved flag bits are set")
     mode = flags & _FLAG_MODE
-    _header_error_if(mode not in (MODE_STORED, MODE_DEFLATE),
-                     "unknown storage mode")
     original_len = int.from_bytes(blob[5:9], "big")
     payload_len = int.from_bytes(blob[9:13], "big")
     crc_expected = int.from_bytes(blob[13:17], "big")
@@ -182,6 +180,9 @@ def decompress(blob: bytes) -> bytes:
             result += dec.flush()
         except zlib.error as exc:
             raise CorruptPayloadError("deflate stream is corrupt: %s" % exc)
+        if not dec.eof:
+            raise CorruptPayloadError(
+                "deflate stream ends prematurely: no final block")
         if dec.unused_data:
             raise CorruptPayloadError("deflate stream contains trailing data")
         if len(result) != original_len:
