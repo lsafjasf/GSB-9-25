@@ -155,7 +155,7 @@ def compile_flag(raw: Mapping[str, Any]) -> CompiledFlag:
 @dataclass(frozen=True)
 class TraceStep:
     rule: str      # 命中的层级，如 "time_window" / "env_override" / "rollout" / "default"
-    outcome: str   # hit | miss | conflict | error | skip
+    outcome: str   # hit | miss | conflict | suppressed | error | skip
     detail: str
 
 
@@ -275,19 +275,40 @@ class Snapshot:
                     top_priority = hits[0].priority
                     tier = [r for r in hits if r.priority == top_priority]
                     winner = tier[0]  # 已按 rule_id 升序排序 → 确定消解
-                    if len(tier) > 1 and any(r.value != winner.value for r in tier[1:]):
-                        losers = [r.rule_id for r in tier[1:]]
-                        trace.append(TraceStep(
-                            "rollout", "conflict",
-                            f"优先级 {top_priority} 处 {len(tier)} 条规则结论冲突，"
-                            f"按 rule_id 字典序确定消解：{winner.rule_id!r} 胜出，被压制: {losers}"))
-                        logger.warning("flag %s 灰度规则冲突，%s 胜出，被压制: %s",
-                                       key, winner.rule_id, losers)
-                    bucket = stable_bucket(flag.key, user_id, winner.salt)
-                    trace.append(TraceStep(
-                        "rollout", "hit",
-                        f"规则 {winner.rule_id!r} 命中：bucket={bucket} < "
-                        f"{winner.percentage}% → {winner.value!r}"))
+                    conflict_ids = []
+                    for idx, r in enumerate(hits):
+                        # 每条命中规则都留痕（含被高优先级压制的低优先级命中），
+                        # 冲突只标记在同优先级且结论相反的规则之间。
+                        bucket = stable_bucket(flag.key, user_id, r.salt)
+                        if idx == 0:
+                            trace.append(TraceStep(
+                                "rollout", "hit",
+                                f"规则 {r.rule_id!r} 命中并生效：bucket={bucket} < "
+                                f"{r.percentage}% → {r.value!r}"))
+                        elif r.priority == top_priority:
+                            if r.value != winner.value:
+                                conflict_ids.append(r.rule_id)
+                                trace.append(TraceStep(
+                                    "rollout", "conflict",
+                                    f"规则 {r.rule_id!r} 同样命中：bucket={bucket} < "
+                                    f"{r.percentage}% → {r.value!r}，与同优先级 {top_priority} 的"
+                                    f"胜出规则 {winner.rule_id!r}（{winner.value!r}）结论冲突，"
+                                    f"按 rule_id 字典序消解，本规则被压制"))
+                            else:
+                                trace.append(TraceStep(
+                                    "rollout", "suppressed",
+                                    f"规则 {r.rule_id!r} 同样命中：bucket={bucket} < "
+                                    f"{r.percentage}% → {r.value!r}，与同优先级 {top_priority} 的"
+                                    f"胜出规则 {winner.rule_id!r} 结论相同，不重复生效"))
+                        else:
+                            trace.append(TraceStep(
+                                "rollout", "suppressed",
+                                f"规则 {r.rule_id!r} 命中：bucket={bucket} < "
+                                f"{r.percentage}% → {r.value!r}，但优先级 {r.priority} 低于"
+                                f"胜出优先级 {top_priority}（{winner.rule_id!r}），被压制"))
+                    if conflict_ids:
+                        logger.warning("flag %s 灰度规则冲突，%s 胜出，同优先级被压制: %s",
+                                       key, winner.rule_id, conflict_ids)
                     return EvalResult(key, winner.value, "rollout", tuple(trace), self._version)
                 trace.append(TraceStep("rollout", "miss", "未落入任何灰度比例"))
 

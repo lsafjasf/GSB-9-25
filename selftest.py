@@ -4,9 +4,10 @@
   1. 优先级与规则链可解释性
   2. 分桶稳定性 + 不同灰度比例下的实际命中分布
   3. 一致性快照隔离 + 并发读取安全
-  4. 规则冲突确定消解与留痕
+  4. 规则冲突确定消解与留痕（所有命中规则均留痕，冲突仅限同优先级）
   5. 边界行为：配置缺失 / 比例 0 与 100 / 非法时间窗口
   6. 十万次求值耗时基准
+  7. README 示例可复现
 """
 
 import statistics
@@ -148,12 +149,58 @@ r1 = snap.evaluate("f", user_id="u1", now=NOW)
 r2 = snap.evaluate("f", user_id="u1", now=NOW)
 check("同优先级相反结论 → 按 rule_id 字典序确定消解", r1.value == "A")
 check("消解结果跨求值确定一致", r2.value == "A")
-conflicts = [s for s in r1.trace if s.outcome == "conflict"]
-check("冲突留痕（含胜出与被压制规则）",
-      len(conflicts) == 1 and "rule_a" in conflicts[0].detail and "rule_b" in conflicts[0].detail)
-check("高优先级压过低优先级", all("rule_z" not in s.detail or s.outcome != "hit" for s in r1.trace))
+rollout_steps = [s for s in r1.trace if s.rule == "rollout"]
+def step_for(rule_id, steps=rollout_steps):
+    return next((s for s in steps if f"'{rule_id}'" in s.detail), None)
+check("三条命中规则全部留痕（低优先级命中不静默丢弃）",
+      [s.outcome for s in rollout_steps] == ["hit", "conflict", "suppressed"],
+      str([(s.outcome, s.detail) for s in rollout_steps]))
+check("胜出规则 rule_a 标 hit", step_for("rule_a").outcome == "hit")
+check("冲突只标记在同优先级之间（rule_b，注明同优先级 5）",
+      step_for("rule_b").outcome == "conflict"
+      and "rule_a" in step_for("rule_b").detail and "优先级 5" in step_for("rule_b").detail)
+check("更低优先级命中 rule_z 可见但不记冲突（suppressed）",
+      step_for("rule_z").outcome == "suppressed"
+      and "优先级 1" in step_for("rule_z").detail
+      and "胜出优先级 5" in step_for("rule_z").detail)
+check("冲突记录恰好一条（低优先级命中不算冲突）",
+      [s.outcome for s in rollout_steps].count("conflict") == 1)
+
+# 同优先级同结论 + 更低优先级命中：都不是冲突，但同样要可见
+snap_same = make_store(key="g", default="d", rollouts=[
+    {"rule_id": "g_a", "value": "ON", "percentage": 100, "priority": 5},
+    {"rule_id": "g_b", "value": "ON", "percentage": 100, "priority": 5},
+    {"rule_id": "g_c", "value": "OFF", "percentage": 100, "priority": 1},
+]).snapshot()
+g_steps = [s for s in snap_same.evaluate("g", user_id="u1", now=NOW).trace
+           if s.rule == "rollout"]
+check("同优先级同结论不记冲突，三条命中仍全部留痕",
+      [s.outcome for s in g_steps] == ["hit", "suppressed", "suppressed"],
+      str([(s.outcome, s.detail) for s in g_steps]))
 print("---- 冲突留痕示例 ----")
 print(r1.explain())
+
+# ---------------------------------------------------------------------------
+print("== 7. README 示例可复现 ==")
+# ---------------------------------------------------------------------------
+readme_cfg = {
+    "key": "checkout_v2",
+    "default": False,
+    "env_overrides": {"prod": True},
+    "rollouts": [{"rule_id": "r1", "value": "grey", "percentage": 25}],
+    "time_window": {"start": "2026-01-01T00:00:00+00:00",
+                    "end": "2027-01-01T00:00:00+00:00"},
+}
+readme_snap = make_store(**readme_cfg).snapshot()
+r = readme_snap.evaluate("checkout_v2", user_id="u5", env="staging", now=NOW)
+check("README 示例 user_id='u5' 命中 25% 灰度（bucket=739 < 2500）",
+      r.value == "grey" and r.reason == "rollout"
+      and "bucket=739 < 25.0%" in r.trace[-1].detail)
+r = readme_snap.evaluate("checkout_v2", user_id="u1", env="staging", now=NOW)
+check("README 示例 user_id='u1' 不命中 25% → 默认值 False",
+      r.value is False and r.reason == "default")
+print("---- README 示例真实输出（25% 灰度，user_id='u5'）----")
+print(readme_snap.evaluate("checkout_v2", user_id="u5", env="staging", now=NOW).explain())
 
 # ---------------------------------------------------------------------------
 print("== 5. 边界行为 ==")

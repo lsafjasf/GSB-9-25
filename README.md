@@ -6,8 +6,9 @@ Python 3，仅标准库。支持默认值、环境覆盖、用户分桶灰度、
 ## 运行
 
 ```bash
-python3 selftest.py    # 31 项断言 + 分布数据 + 十万次求值基准
+python3 selftest.py    # 37 项断言 + 分布数据 + 十万次求值基准
 python3 - << 'PY'      # 最小示例
+from datetime import datetime, timezone
 from feature_flags import FlagStore
 store = FlagStore()
 store.load([{"key": "checkout_v2", "default": False,
@@ -16,7 +17,8 @@ store.load([{"key": "checkout_v2", "default": False,
              "time_window": {"start": "2026-01-01T00:00:00+00:00",
                              "end": "2027-01-01T00:00:00+00:00"}}])
 snap = store.snapshot()          # 一次请求抓一个快照
-print(snap.evaluate("checkout_v2", user_id="u1", env="staging").explain())
+now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+print(snap.evaluate("checkout_v2", user_id="u5", env="staging", now=now).explain())
 PY
 ```
 
@@ -32,17 +34,35 @@ PY
 `result.explain()` 输出完整规则链，例如：
 
 ```
-flag='checkout_v2' value='grey' reason=rollout (config v1)
+flag='checkout_v2' value='grey' reason=rollout (config v1)   # u5 的 bucket=739 < 2500
   [hit     ] time_window: 当前时间在窗口内，继续向下求值
   [miss    ] env_override: env='staging' 无覆盖
-  [hit     ] rollout: 规则 'r1' 命中：bucket=5372 < 100.0% → 'grey'
+  [hit     ] rollout: 规则 'r1' 命中并生效：bucket=739 < 25.0% → 'grey'
 ```
+
+25% 灰度下并非每个用户都命中：`user_id="u1"` 的 bucket=5372 ≥ 2500，
+同一配置求值结果为 `value=False, reason=default`。
 
 ## 冲突消解
 
-同优先级多条灰度规则同时命中且结论相反：**按 `rule_id` 字典序取最小者胜出**
-（编译期已排序，消解零成本、跨求值确定一致），并在 trace 中留下
-`outcome=conflict` 的记录（含胜出与被压制规则），同时写 `logging` warning。
+多条灰度规则同时命中时，**每条命中规则都会在 trace 中留痕**（不会被静默丢弃）：
+
+- 最终生效的规则：`outcome=hit`
+- **同优先级**且结论相反的命中：`outcome=conflict`，**按 `rule_id` 字典序取最小者胜出**
+  （编译期已排序，消解零成本、跨求值确定一致），同时写 `logging` warning
+- 同优先级但结论相同的命中：`outcome=suppressed`（不重复生效，不算冲突）
+- 优先级低于胜出层的命中：`outcome=suppressed`（高优先级生效，低优先级仅留痕，不算冲突）
+
+冲突只标记在同优先级规则之间。例如三条规则
+`rule_b`(B, p5) / `rule_a`(A, p5) / `rule_z`(Z, p1) 同时命中：
+
+```
+flag='f' value='A' reason=rollout (config v1)
+  [miss    ] env_override: env=None 无覆盖
+  [hit     ] rollout: 规则 'rule_a' 命中并生效：bucket=7067 < 100.0% → 'A'
+  [conflict] rollout: 规则 'rule_b' 同样命中：bucket=7067 < 100.0% → 'B'，与同优先级 5 的胜出规则 'rule_a'（'A'）结论冲突，按 rule_id 字典序消解，本规则被压制
+  [suppressed] rollout: 规则 'rule_z' 命中：bucket=7067 < 100.0% → 'Z'，但优先级 1 低于胜出优先级 5（'rule_a'），被压制
+```
 
 ## 边界行为（明确约定）
 
@@ -92,5 +112,5 @@ flag='checkout_v2' value='grey' reason=rollout (config v1)
 
 十万次求值耗时（含完整规则链构建）：
 
-- 冷缓存 0.243s（2.43µs/次，约 41 万次/s）；热缓存 0.222s（2.22µs/次，约 45 万次/s）
-- 分桶微基准：SHA-256 未命中 0.73µs/次，lru_cache 命中 0.13µs/次，**加速 5.5x**
+- 冷缓存 0.257s（2.57µs/次，约 39 万次/s）；热缓存 0.239s（2.39µs/次，约 42 万次/s）
+- 分桶微基准：SHA-256 未命中 0.78µs/次，lru_cache 命中 0.17µs/次，**加速 4.7x**
