@@ -3,14 +3,30 @@
 Supported subset (a common uncompressed bitmap format):
   - Windows BMP ("BM" magic), BITMAPINFOHEADER (>= 40 bytes)
   - 24-bit and 32-bit pixels, BI_RGB (uncompressed) only
-  - Row stride padded to 4 bytes (padding is always emitted as zero)
+  - Row stride padded to 4 bytes; whatever bytes the source carries in
+    the per-row gap are preserved verbatim on a byte-exact round-trip
   - Bottom-up (positive height) and top-down (negative height) row order
 
 Pixel storage: `BMPImage.pixels` is a bytearray in *logical top-down*
 row-major order, tightly packed (no padding), channels in file order
 (B, G, R [, X]).  For 32-bit images the 4th byte (reserved/alpha) is
 carried through verbatim on round-trip and interpolated like any other
-channel when scaling.
+channel when scaling.  The source file's row-padding bytes are kept in
+`BMPImage.row_padding` (one per-row gap, emitted after every row) and the
+`biXPelsPerMeter`/`biYPelsPerMeter` resolution fields are kept in
+`xpels_per_meter`/`ypels_per_meter`; both round-trip byte-for-byte.
+
+Round-trip contract
+-------------------
+For any file this library accepts, `dumps(loads(data)) == data` exactly:
+pixel bytes, the 32-bit reserved channel, row order, row-padding bytes,
+and the X/Y resolution fields are all preserved.  Only structurally
+derived/non-informational header fields are regenerated: file size,
+pixel-data offset, biSizeImage (all recomputed from the pixel data), and
+the reserved header words are emitted as zero.  DIB headers larger than
+40 bytes (BITMAPV4/V5 extensions, embedded ICC data, palettes) are not
+retained; images created via the constructor default to zero padding and
+2835 px/m (~72 DPI).
 
 Scaling boundary rules
 ----------------------
@@ -76,6 +92,12 @@ class BMPImage:
     bpp: int
     pixels: bytearray
     top_down: bool = False
+    #: biXPelsPerMeter (horizontal print resolution), preserved on round-trip.
+    xpels_per_meter: int = 2835
+    #: biYPelsPerMeter (vertical print resolution), preserved on round-trip.
+    ypels_per_meter: int = 2835
+    #: Bytes placed in each row's alignment gap; preserved on round-trip.
+    row_padding: bytes = b""
 
     @property
     def bytes_per_pixel(self) -> int:
@@ -119,9 +141,16 @@ def loads(data: bytes) -> BMPImage:
     if len(data) < _FILE_HEADER_SIZE + header_size:
         raise BMPError("文件头非法：DIB 头被截断")
 
-    (width, height_raw, planes, bpp, compression, image_size) = struct.unpack_from(
-        "<iiHHII", data, 18
-    )
+    (
+        width,
+        height_raw,
+        planes,
+        bpp,
+        compression,
+        image_size,
+        xpels_per_meter,
+        ypels_per_meter,
+    ) = struct.unpack_from("<iiHHIIii", data, 18)
 
     if planes != 1:
         raise BMPError(f"文件头非法：planes={planes}，应为 1")
@@ -161,11 +190,23 @@ def loads(data: bytes) -> BMPImage:
         )
 
     row_bytes = width * (bpp // 8)
+    pad_len = stride - row_bytes
     pixels = bytearray(row_bytes * height)
     for row in range(height):
         src = pixel_offset + row * stride
         dst = row * row_bytes
         pixels[dst : dst + row_bytes] = data[src : src + row_bytes]
+    # Capture the per-row alignment gap. The gap is metadata-free but a
+    # byte-exact round-trip must reproduce whatever the source carried, so
+    # remember it and require the gaps to agree (they must for a valid BMP).
+    row_padding = bytes(data[pixel_offset + row_bytes : pixel_offset + stride])
+    for row in range(1, height):
+        start = pixel_offset + row * stride + row_bytes
+        if bytes(data[start : start + pad_len]) != row_padding:
+            raise BMPError(
+                "文件头非法：各行的填充字节不一致，无法无损往返"
+                "（BMP 要求所有行使用相同的对齐填充）"
+            )
     if not top_down:
         # File stores rows bottom-up; normalise to logical top-down.
         flipped = bytearray(len(pixels))
@@ -174,7 +215,16 @@ def loads(data: bytes) -> BMPImage:
             flipped[row * row_bytes : (row + 1) * row_bytes] = pixels[src : src + row_bytes]
         pixels = flipped
 
-    return BMPImage(width=width, height=height, bpp=bpp, pixels=pixels, top_down=top_down)
+    return BMPImage(
+        width=width,
+        height=height,
+        bpp=bpp,
+        pixels=pixels,
+        top_down=top_down,
+        xpels_per_meter=xpels_per_meter,
+        ypels_per_meter=ypels_per_meter,
+        row_padding=row_padding,
+    )
 
 
 def load(path: str) -> BMPImage:
@@ -196,6 +246,25 @@ def dumps(img: BMPImage) -> bytes:
         )
 
     stride = _row_stride(img.width, img.bpp)
+    pad_len = stride - row_bytes
+    row_padding = bytes(img.row_padding)
+    if row_padding == b"" and pad_len:
+        # Images constructed directly (rather than decoded) carry no
+        # explicit gap; keep the historical default of zero padding.
+        row_padding = b"\x00" * pad_len
+    elif len(row_padding) != pad_len:
+        raise BMPError(
+            f"尺寸与数据长度不符：行填充 {len(row_padding)} 字节，"
+            f"按 {img.width}x{img.bpp} 应对齐到 {pad_len} 字节"
+        )
+    for name, value in (
+        ("xpels_per_meter", img.xpels_per_meter),
+        ("ypels_per_meter", img.ypels_per_meter),
+    ):
+        if not isinstance(value, int) or not -(1 << 31) <= value < (1 << 31):
+            raise BMPError(
+                f"文件头非法：{name}={value!r} 必须是 32 位有符号整数"
+            )
     image_size = stride * img.height
     pixel_offset = _FILE_HEADER_SIZE + _MIN_INFO_HEADER_SIZE
     file_size = pixel_offset + image_size
@@ -211,17 +280,16 @@ def dumps(img: BMPImage) -> bytes:
         img.bpp,
         _BI_RGB,
         image_size,
-        2835,  # ~72 DPI, informational only
-        2835,
+        img.xpels_per_meter,
+        img.ypels_per_meter,
         0,
         0,
     )
-    pad = b"\x00" * (stride - row_bytes)
     rows = range(img.height) if img.top_down else range(img.height - 1, -1, -1)
     for row in rows:
         start = row * row_bytes
         out += img.pixels[start : start + row_bytes]
-        out += pad
+        out += row_padding
     return bytes(out)
 
 
@@ -252,7 +320,16 @@ def resize_nearest(img: BMPImage, new_width: int, new_height: int) -> BMPImage:
             s = src_row + sx * bpp
             d = dst_row + x * bpp
             out[d : d + bpp] = src[s : s + bpp]
-    return BMPImage(new_width, new_height, img.bpp, out, img.top_down)
+    return BMPImage(
+        new_width,
+        new_height,
+        img.bpp,
+        out,
+        img.top_down,
+        img.xpels_per_meter,
+        img.ypels_per_meter,
+        b"\x00" * (_row_stride(new_width, bpp) - new_width * bpp),
+    )
 
 
 def resize_bilinear(img: BMPImage, new_width: int, new_height: int) -> BMPImage:
@@ -299,4 +376,13 @@ def resize_bilinear(img: BMPImage, new_width: int, new_height: int) -> BMPImage:
                 bot = src[p10 + c] * wx0 + src[p11 + c] * wx1
                 value = (top * wy0 + bot * wy1 + 32768) >> 16
                 out[d + c] = value
-    return BMPImage(new_width, new_height, img.bpp, out, img.top_down)
+    return BMPImage(
+        new_width,
+        new_height,
+        img.bpp,
+        out,
+        img.top_down,
+        img.xpels_per_meter,
+        img.ypels_per_meter,
+        b"\x00" * (_row_stride(new_width, bpp) - new_width * bpp),
+    )

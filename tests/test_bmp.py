@@ -26,6 +26,25 @@ def make_image(width, height, bpp, top_down=False, seed=7):
     return BMPImage(width, height, bpp, make_pixels(width, height, bpp, seed), top_down)
 
 
+def craft_bmp_file(width, height, bpp, pad_byte, xpels, ypels, top_down=False):
+    """Hand-build a BMP that a conformant writer would never produce:
+    non-zero row-padding bytes and custom (asymmetric) DPI fields."""
+    row_bytes = width * (bpp // 8)
+    stride = ((row_bytes + 3) // 4) * 4
+    height_field = -height if top_down else height
+    data = bytearray()
+    data += struct.pack("<2sIHHI", b"BM", 54 + stride * height, 0, 0, 54)
+    data += struct.pack(
+        "<IiiHHIIiiII",
+        40, width, height_field, 1, bpp, 0, stride * height,
+        xpels, ypels, 0, 0,
+    )
+    for row in range(height):
+        data += bytes(((row * 31 + col * 7) & 0xFF for col in range(row_bytes)))
+        data += bytes([pad_byte]) * (stride - row_bytes)
+    return bytes(data)
+
+
 class RoundTripTests(unittest.TestCase):
     SIZES = [(1, 1), (1, 7), (2, 5), (3, 3), (4, 4), (5, 2), (17, 1), (1, 17), (16, 16), (31, 3)]
 
@@ -65,6 +84,47 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(len(bmp.dumps(make_image(4, 1, 24))), 54 + 12)
         # 32bpp rows are naturally aligned.
         self.assertEqual(len(bmp.dumps(make_image(3, 2, 32))), 54 + 24)
+
+    def test_nonzero_padding_and_custom_resolution_roundtrip_byte_exact(self):
+        # Source file carries junk (non-zero) bytes in every alignment gap
+        # and asymmetric custom resolution fields: dumps(loads(x)) must be x.
+        cases = [
+            # width, height, bpp, pad byte, x px/m, y px/m, top-down
+            (3, 2, 24, 0xA5, 96, 300, False),
+            (5, 3, 24, 0x7E, 0, 0, True),
+            (1, 4, 24, 0x01, 12345, 6789, False),
+            (2, 2, 24, 0xFF, 2835, 1417, True),
+        ]
+        for width, height, bpp_, pad_byte, xpels, ypels, top_down in cases:
+            with self.subTest(size=(width, height), pad=hex(pad_byte),
+                              dpi=(xpels, ypels), top_down=top_down):
+                raw = craft_bmp_file(width, height, bpp_, pad_byte,
+                                     xpels, ypels, top_down)
+                img = bmp.loads(raw)
+                self.assertEqual((img.xpels_per_meter, img.ypels_per_meter),
+                                 (xpels, ypels))
+                row_bytes = width * (bpp_ // 8)
+                pad_len = ((row_bytes + 3) // 4) * 4 - row_bytes
+                self.assertEqual(img.row_padding, bytes([pad_byte]) * pad_len)
+                # The round-trip assertion: no byte anywhere may change.
+                self.assertEqual(bmp.dumps(img), raw)
+                # And it must stay stable across repeated round-trips.
+                self.assertEqual(bmp.dumps(bmp.loads(bmp.dumps(img))), raw)
+
+    def test_inconsistent_row_padding_rejected(self):
+        raw = bytearray(craft_bmp_file(3, 2, 24, 0xA5, 96, 300))
+        stride = 12
+        raw[54 + stride + 9] = 0x00  # corrupt one pad byte in the 2nd row
+        with self.assertRaisesRegex(BMPError, "填充字节不一致"):
+            bmp.loads(bytes(raw))
+
+    def test_constructed_images_still_default_to_zero_padding(self):
+        img = make_image(1, 2, 24)
+        blob = bmp.dumps(img)
+        self.assertEqual(blob[57], 0)
+        self.assertEqual(blob[61], 0)
+        # Resolution defaults stay 2835 px/m (~72 DPI).
+        self.assertEqual(struct.unpack_from("<ii", blob, 38), (2835, 2835))
 
     def test_row_order_on_disk(self):
         img = make_image(2, 2, 24, top_down=False)

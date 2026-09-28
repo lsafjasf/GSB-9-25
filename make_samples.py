@@ -2,7 +2,7 @@
 
 import os
 
-from bmp import BMPImage, save
+from bmp import BMPImage, dumps, save
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 
@@ -30,6 +30,14 @@ def main():
     save(gradient(1, 1, 32, reserved=0xAB), os.path.join(OUT, "tiny_1x1_32.bmp"))
     save(gradient(511, 1, 24), os.path.join(OUT, "wide_511x1_24.bmp"))
     save(gradient(1, 511, 32, reserved=0x01), os.path.join(OUT, "narrow_1x511_32.bmp"))
+    # Quirky file: non-zero row-padding bytes and a custom asymmetric DPI.
+    # Exercises the byte-exact round-trip (padding/resolution preservation).
+    img = gradient(7, 4, 24)
+    img.xpels_per_meter = 96
+    img.ypels_per_meter = 300
+    img.row_padding = b"\xA5" * 3  # 7px*3bpp = 21 -> 3 pad bytes per row
+    with open(os.path.join(OUT, "quirky_7x4_24_nonzero_pad.bmp"), "wb") as fh:
+        fh.write(dumps(img))
     print("wrote", len(os.listdir(OUT)), "samples to", OUT)
 
 
