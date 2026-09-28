@@ -102,18 +102,40 @@ class TestAbnormalIdentity(unittest.TestCase):
 
     def test_missing_or_invalid_id(self):
         for bad in (None, "", 123, b"bytes"):
-            self.assertEqual(self.rx.receive(msg(bad, 1)), "processed_bad_id")
-        self.assertEqual(self.rx.stats["bad_id"], 4)
-        self.assertEqual(len(self.handled), 4)  # 无法去重，必须处理
+            self.assertEqual(self.rx.receive(msg(bad, 1)), "undecidable")
+        self.assertEqual(self.rx.stats["undecidable"], 4)
+        # 无法去重的消息不交给正常处理器，与正常处理分开
+        self.assertEqual(len(self.handled), 0)
 
     def test_missing_or_invalid_seq(self):
-        self.assertEqual(self.rx.receive({"id": "s"}), "processed_bad_id")
-        self.assertEqual(self.rx.receive(msg("s", -1)), "processed_bad_id")
-        self.assertEqual(self.rx.receive(msg("s", "3")), "processed_bad_id")
-        self.assertEqual(self.rx.receive(msg("s", True)), "processed_bad_id")
-        self.assertEqual(self.rx.stats["bad_id"], 4)
+        self.assertEqual(self.rx.receive({"id": "s"}), "undecidable")
+        self.assertEqual(self.rx.receive(msg("s", -1)), "undecidable")
+        self.assertEqual(self.rx.receive(msg("s", "3")), "undecidable")
+        self.assertEqual(self.rx.receive(msg("s", True)), "undecidable")
+        self.assertEqual(self.rx.stats["undecidable"], 4)
+        self.assertEqual(len(self.handled), 0)
         # 异常序号不污染正常流状态
         self.assertEqual(self.rx.receive(msg("s", 3)), "processed_new_stream")
+
+    def test_redelivered_undecidable_not_processed_twice(self):
+        # 复现用例：同一封缺标识消息重投一次，修复前会被 handler 处理两次，
+        # 违背"同一消息只处理一次"；修复后两次都只计 undecidable，不处理
+        dup = msg(None, 5, "no-id")
+        self.assertEqual(self.rx.receive(dict(dup)), "undecidable")
+        self.assertEqual(self.rx.receive(dict(dup)), "undecidable")
+        self.assertEqual(len(self.handled), 0)
+        self.assertEqual(self.rx.stats["undecidable"], 2)
+        self.assertEqual(self.rx.stats["processed"], 0)
+
+    def test_undecidable_routed_to_separate_handler(self):
+        quarantined = []
+        rx = DedupReceiver(window_size=8, max_streams=4,
+                           handler=self.handled.append,
+                           undecidable_handler=quarantined.append)
+        self.assertEqual(rx.receive(msg(None, 1)), "undecidable")
+        self.assertEqual(rx.receive(msg("s", 1)), "processed_new_stream")
+        self.assertEqual(len(quarantined), 1)   # 无法判定的进隔离处理器
+        self.assertEqual(len(self.handled), 1)  # 正常处理器只见正常消息
 
 
 class TestBoundedMemory(unittest.TestCase):
@@ -153,12 +175,13 @@ class TestStatsConsistency(unittest.TestCase):
         self.assertEqual(s["received"], len(scenario))
         self.assertEqual(s["received"],
                          s["processed"] + s["duplicate"]
-                         + s["expired"] + s["conflict"])
+                         + s["expired"] + s["conflict"]
+                         + s["undecidable"])
         self.assertTrue(rx.check_consistency())
         self.assertEqual(s["duplicate"], 2)
         self.assertEqual(s["conflict"], 1)
         self.assertEqual(s["expired"], 2)
-        self.assertEqual(s["bad_id"], 2)
+        self.assertEqual(s["undecidable"], 2)
 
 
 if __name__ == "__main__":

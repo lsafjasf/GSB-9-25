@@ -10,13 +10,15 @@
 | `dedup_receiver.py` | 库源码（`DedupReceiver`），`__main__` 为统计输出样例 |
 | `test_dedup_receiver.py` | 自测：边界、误判、乱序/跳跃/回绕、异常标识、统计自洽 |
 | `memory_benchmark.py` | 内存基准：连续处理千万级消息，观测 RSS 与状态大小 |
+| `throughput_benchmark.py` | 吞吐基准：对比不同 `window_size` 下的处理速度 |
 
 ## 运行命令
 
 ```bash
 python3 dedup_receiver.py                      # 统计输出样例
-python3 -m unittest test_dedup_receiver -v     # 自测（13 个用例）
+python3 -m unittest test_dedup_receiver -v     # 自测（15 个用例）
 python3 memory_benchmark.py 10000000           # 内存基准（默认 1 千万条）
+python3 throughput_benchmark.py                # 吞吐基准（窗口调大不再掉速）
 ```
 
 ## 设计
@@ -37,11 +39,29 @@ python3 memory_benchmark.py 10000000           # 内存基准（默认 1 千万�
 | 落后距离 < `window_size`，哈希不一致 | **同标识不同内容**：丢弃，计 `conflict` |
 | 落后距离 < `window_size`，未见过该 seq | 乱序新消息，正常处理 |
 | 落后距离 >= `window_size` | **窗口外迟到**：丢弃，计 `expired` |
-| `id`/`seq` 缺失或非法 | 无法去重，为保证不丢消息仍处理，计 `bad_id` |
+| `id`/`seq` 缺失或非法 | **无法判定是否重复**：不交给正常处理器（否则同一封消息重投一次就会被处理两次），单独计 `undecidable`；可用 `undecidable_handler` 路由到隔离处理器 |
 
 - **内存有界**：流数量上限 `max_streams`（LRU 淘汰，计 `evictions`），
   每流窗口上限 `window_size`，状态总量 <= `max_streams * window_size`
   条小记录，与处理消息总量无关。
+- **窗口推进为增量淘汰**：`max_seq` 每前进 1 位恰好有 1 个序号滑出窗口，
+  前进 `delta` 位只删除这 `delta` 个序号（均摊 O(1)），不再全表扫描
+  窗口字典，因此 `window_size` 调大不影响吞吐。
+
+## 无法判定的消息
+
+`id`/`seq` 缺失或非法的消息无法去重。若直接交给正常处理器，同一封消息
+重投一次就会被处理两次，违背"同一消息只处理一次"的前提。因此这类消息
+**不参与正常处理**，单独计 `undecidable`；如需留存可传入
+`undecidable_handler` 将其路由到隔离处理器（如写死信队列），与正常
+处理完全分开。统计自洽不变式相应变为：
+
+```
+received == processed + duplicate + expired + conflict + undecidable
+```
+
+复现用例见 `test_redelivered_undecidable_not_processed_twice`：同一封
+缺标识消息连续重投两次，断言正常处理器一次都不会被调用。
 
 ## 误判风险量化
 
@@ -79,16 +99,33 @@ LRU 淘汰会引入额外的漏判重复风险，应使 `max_streams` 覆盖活�
 
 ```
          已处理   RSS(MB)     流数      窗口记录数
-   1,000,000      31.2    512    131,072
-   5,000,000      31.2    512    131,072
-  10,000,000      31.2    512    131,072
+   1,000,000      33.1    512    131,072
+   5,000,000      33.1    512    131,072
+  10,000,000      33.1    512    131,072
 
-耗时 83.3s (120,093 msg/s)
+耗时 11.0s (909,747 msg/s)
 最终状态: 512 个流, 131,072 条窗口记录 (上界 131,072)，与消息总量无关
 ```
 
-RSS 全程持平在 31.2 MB，窗口记录数恒等于上界 `512 * 256 = 131,072`，
+RSS 全程持平在 33.1 MB，窗口记录数恒等于上界 `512 * 256 = 131,072`，
 验证了状态大小不随消息总量增长。
+
+## 吞吐数据（窗口调大对比）
+
+`python3 throughput_benchmark.py 100000`（顺序消息 10 万条 × 64 流，实测）：
+
+```
+ window_size   修复前(msg/s)   修复后(msg/s)
+         256         175,795       1,262,187
+         512          94,031       1,389,222
+        1024          58,654       1,363,583
+        2048          52,174       1,340,442
+        4096          52,434       1,365,597
+```
+
+修复前窗口推进每条消息都全表扫描窗口字典，吞吐随窗口增大从 ~17.6 万
+掉到 ~5.2 万 msg/s；修复后为增量淘汰（均摊 O(1)），吞吐稳定在
+~136 万 msg/s，与窗口大小无关。
 
 ## 统计输出样例
 
@@ -99,18 +136,18 @@ RSS 全程持平在 31.2 MB，窗口记录数恒等于上界 `512 * 256 = 131,07
 {'id': 'up-1', 'seq': 2, 'payload': 'B!'}                  -> conflict
 {'id': 'up-1', 'seq': 3, 'payload': 'c'}                   -> expired
 {'id': 'up-1', 'seq': 0, 'payload': 'y'}                   -> processed   # 回绕
-{'id': None, 'seq': 5, 'payload': 'no-id'}                 -> processed_bad_id
+{'id': None, 'seq': 5, 'payload': 'no-id'}                 -> undecidable
 
 统计输出:
   received   = 14
-  processed  = 9
+  processed  = 7
   duplicate  = 3
   expired    = 1
   conflict   = 1
-  bad_id     = 2
+  undecidable = 2
   jumps      = 3
   evictions  = 0
-自洽校验通过: received == processed + duplicate + expired + conflict
+自洽校验通过: received == processed + duplicate + expired + conflict + undecidable
 ```
 
-基准的统计自洽性：`9,890,665 + 99,846 + 9,489 + 0 = 10,000,000 = received`。
+基准的统计自洽性：`9,880,102 + 99,846 + 9,489 + 0 + 10,563 = 10,000,000 = received`。

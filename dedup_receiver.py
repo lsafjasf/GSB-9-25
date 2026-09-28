@@ -16,14 +16,16 @@
     哈希一致判重复丢弃；哈希不一致判"同标识不同内容"冲突，丢弃并单独计数。
   - ``seq`` 落后距离 >= window_size：窗口外的迟到消息，无法区分
     "迟到重复"与"被延迟的新消息"，按保守策略**丢弃并计 expired**。
-* ``id`` 缺失/非法或 ``seq`` 缺失/非法：无法去重，为保证不丢消息，
-  直接处理并计 bad_id。
+* ``id`` 缺失/非法或 ``seq`` 缺失/非法：无法判定是否重复，**不交给正常
+  处理器**（否则同一封消息重投一次就会被处理两次，违背"同一消息只处理
+  一次"），单独计 undecidable；若提供了 ``undecidable_handler`` 则路由
+  到该隔离处理器，与正常处理完全分开。
 * 内存有界：流数量上限 ``max_streams``（LRU 淘汰），每流窗口上限
   ``window_size``，总状态 <= max_streams * window_size 条小记录，
   与处理消息总量无关。
 
 统计自洽不变式：received == processed + duplicate + expired + conflict
-（bad_id 是 processed 的子集标注，jumps / evictions 为信息性计数）。
++ undecidable（jumps / evictions 为信息性计数）。
 """
 
 from collections import OrderedDict
@@ -48,7 +50,7 @@ class _StreamState:
 
 class DedupReceiver:
     def __init__(self, window_size=1024, max_streams=128, seq_bits=32,
-                 handler=None, hash_fn=None):
+                 handler=None, hash_fn=None, undecidable_handler=None):
         if window_size < 1:
             raise ValueError("window_size must be >= 1")
         if max_streams < 1:
@@ -65,14 +67,15 @@ class DedupReceiver:
         self._mask = self._mod - 1
         self.handler = handler if handler is not None else (lambda msg: None)
         self.hash_fn = hash_fn if hash_fn is not None else _default_hash
+        self.undecidable_handler = undecidable_handler
         self._streams = OrderedDict()  # id -> _StreamState, LRU 顺序
         self.stats = {
             "received": 0,    # 收到的消息总数
-            "processed": 0,   # 实际交给 handler 处理的数量（含 bad_id）
+            "processed": 0,   # 实际交给 handler 处理的数量
             "duplicate": 0,   # 窗口内重复，丢弃
             "expired": 0,     # 窗口外迟到（重复或太旧的新消息），丢弃
             "conflict": 0,    # 同 id+seq 但内容不同，丢弃
-            "bad_id": 0,      # 标识/序号缺失或非法，仍然处理（processed 子集）
+            "undecidable": 0, # 标识/序号缺失或非法，无法去重，不处理，单独计数
             "jumps": 0,       # 序号大幅跳跃导致窗口清空的次数
             "evictions": 0,   # 流状态被 LRU 淘汰的次数
         }
@@ -88,8 +91,10 @@ class DedupReceiver:
         payload = msg.get("payload")
 
         if not self._valid_id(mid) or not self._valid_seq(seq):
-            stats["bad_id"] += 1
-            return self._process(msg, "processed_bad_id")
+            stats["undecidable"] += 1
+            if self.undecidable_handler is not None:
+                self.undecidable_handler(msg)
+            return "undecidable"
 
         state = self._streams.get(mid)
         if state is None:
@@ -108,8 +113,9 @@ class DedupReceiver:
             if delta >= self.window_size:
                 stats["jumps"] += 1
                 state.window.clear()
+            else:
+                self._prune(state, seq, delta)
             state.max_seq = seq
-            self._prune(state)
             state.window[seq] = self.hash_fn(payload)
             return self._process(msg, "processed")
         # seq 落后
@@ -125,11 +131,12 @@ class DedupReceiver:
                 sum(len(s.window) for s in self._streams.values()))
 
     def check_consistency(self):
-        """校验统计自洽：received == processed + duplicate + expired + conflict。"""
+        """校验统计自洽：
+        received == processed + duplicate + expired + conflict + undecidable。"""
         s = self.stats
         assert s["received"] == (s["processed"] + s["duplicate"]
-                                 + s["expired"] + s["conflict"]), s
-        assert s["bad_id"] <= s["processed"], s
+                                 + s["expired"] + s["conflict"]
+                                 + s["undecidable"]), s
         return True
 
     # -- 内部 -------------------------------------------------------------
@@ -146,14 +153,17 @@ class DedupReceiver:
         self.handler(msg)
         return result
 
-    def _prune(self, state):
-        # 窗口内只保留落后 max_seq 距离 < window_size 的记录
-        limit = self.window_size
-        mask = self._mask
-        max_seq = state.max_seq
+    def _prune(self, state, new_max_seq, delta):
+        # 增量淘汰：max_seq 每前进 1 位恰好有 1 个序号滑出窗口，
+        # 前进 delta 位只需删除这 delta 个连续序号（均摊 O(1)），
+        # 不再全表扫描整个窗口字典。
         window = state.window
-        for old in [k for k in window if ((max_seq - k) & mask) >= limit]:
-            del window[old]
+        if not window:
+            return
+        mask = self._mask
+        cutoff = new_max_seq - self.window_size  # 最后一个过期序号（模意义下）
+        for old in range(cutoff - delta + 1, cutoff + 1):
+            window.pop(old & mask, None)
 
     def _check_window(self, msg, state, seq, payload):
         stats = self.stats
@@ -185,8 +195,8 @@ if __name__ == "__main__":
         {"id": "up-1", "seq": 255, "payload": "w"},    # 正常前进 -> 处理
         {"id": "up-1", "seq": 0, "payload": "y"},      # 序号回绕(255->0) -> 处理
         {"id": "up-1", "seq": 0, "payload": "y"},      # 回绕后重复 -> duplicate
-        {"id": None, "seq": 5, "payload": "no-id"},    # 标识缺失 -> bad_id，仍处理
-        {"id": "up-2", "payload": "no-seq"},           # 序号缺失 -> bad_id，仍处理
+        {"id": None, "seq": 5, "payload": "no-id"},    # 标识缺失 -> undecidable，不处理
+        {"id": "up-2", "payload": "no-seq"},           # 序号缺失 -> undecidable，不处理
     ]
     for m in scenario:
         print(f"{str(m):58s} -> {rx.receive(m)}")
@@ -195,4 +205,4 @@ if __name__ == "__main__":
     for key, val in rx.stats.items():
         print(f"  {key:10s} = {val}")
     rx.check_consistency()
-    print("\n自洽校验通过: received == processed + duplicate + expired + conflict")
+    print("\n自洽校验通过: received == processed + duplicate + expired + conflict + undecidable")
