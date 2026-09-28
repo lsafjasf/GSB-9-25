@@ -42,6 +42,8 @@ def parse_patch(text: str) -> Patch:
     cur_file: FilePatch | None = None
     cur_hunk: Hunk | None = None
     pending_old_path: str | None = None
+    remaining_old = 0  # old-side body lines the current hunk header still owes
+    remaining_new = 0  # new-side body lines the current hunk header still owes
 
     def close_hunk(lineno: int) -> None:
         nonlocal cur_hunk
@@ -58,6 +60,34 @@ def parse_patch(text: str) -> Patch:
         pending_old_path = None
 
     for i, line in enumerate(lines, start=1):
+        if cur_hunk is not None and (remaining_old > 0 or remaining_new > 0):
+            # We are inside a hunk body: consume exactly the number of lines
+            # the hunk header declared before recognising any new header. A
+            # body line may legitimately start with "--- "/"+++ "/"@@ ..." and
+            # must not be mistaken for the start of another section.
+            if line.startswith("\\"):
+                if not cur_hunk.lines:
+                    raise PatchParseError(
+                        i, "'\\' marker without a preceding body line")
+                last = cur_hunk.lines[-1]
+                if last.kind in (CONTEXT, REMOVE):
+                    cur_hunk.old_no_eol = True
+                if last.kind in (CONTEXT, ADD):
+                    cur_hunk.new_no_eol = True
+            elif line[:1] in (CONTEXT, REMOVE, ADD) or line == "":
+                kind = line[:1] if line[:1] in (CONTEXT, REMOVE, ADD) else CONTEXT
+                cur_hunk.lines.append(HunkLine(kind, line[1:]))
+                if kind == CONTEXT:
+                    remaining_old -= 1
+                    remaining_new -= 1
+                elif kind == REMOVE:
+                    remaining_old -= 1
+                else:
+                    remaining_new -= 1
+            else:
+                raise PatchParseError(
+                    i, f"unexpected line while reading hunk body: {line!r}")
+            continue
         if line.startswith("--- "):
             close_file(i)
             pending_old_path = normalize_path(line[4:])
@@ -81,6 +111,8 @@ def parse_patch(text: str) -> Patch:
                 section=m.group(5),
             )
             cur_file.hunks.append(cur_hunk)
+            remaining_old = cur_hunk.old_count
+            remaining_new = cur_hunk.new_count
         elif line.startswith("\\"):
             if cur_hunk is None or not cur_hunk.lines:
                 raise PatchParseError(i, "'\\' marker without a preceding body line")
@@ -89,9 +121,6 @@ def parse_patch(text: str) -> Patch:
                 cur_hunk.old_no_eol = True
             if last.kind in (CONTEXT, ADD):
                 cur_hunk.new_no_eol = True
-        elif cur_hunk is not None and (line[:1] in (CONTEXT, REMOVE, ADD) or line == ""):
-            kind = line[:1] if line[:1] in (CONTEXT, REMOVE, ADD) else CONTEXT
-            cur_hunk.lines.append(HunkLine(kind, line[1:]))
         # anything else (diff --git, index, blank separators between files,
         # comments) is ignored when not inside a hunk body.
 

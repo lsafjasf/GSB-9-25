@@ -13,6 +13,7 @@ from linepatch import (
     apply_patch_to_tree, apply_to_text, format_patch, parse_patch,
     reversed_patch, PatchParseError,
 )
+from linepatch.model import ADD, CONTEXT, REMOVE
 
 
 def make_patch(old, new, path="f.txt", context=3):
@@ -78,6 +79,32 @@ class ParseTests(unittest.TestCase):
         p = parse_patch(text)
         p2 = parse_patch(format_patch(p))
         self.assertEqual(p, p2)
+
+    def test_body_lines_looking_like_headers_consumed_by_count(self):
+        # body lines that happen to start with "--- "/"+++ "/"@@ " must be
+        # consumed as hunk body per the header counts, not start a new section
+        text = (
+            "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n"
+            " head\n"
+            "---- old header-looking line\n"
+            "++++ new header-looking line\n"
+            " tail\n"
+            "--- a/next\n+++ b/next\n@@ -1 +1 @@\n"
+            "-x\n+y\n"
+        )
+        p = parse_patch(text)
+        self.assertEqual(len(p.files), 2)
+        h = p.files[0].hunks[0]
+        self.assertEqual(
+            [(l.kind, l.text) for l in h.lines],
+            [(CONTEXT, "head"),
+             (REMOVE, "--- old header-looking line"),
+             (ADD, "+++ new header-looking line"),
+             (CONTEXT, "tail")],
+        )
+        self.assertEqual(p.files[1].old_path, "next")
+        # the first section must also survive a serialise/parse roundtrip
+        self.assertEqual(parse_patch(format_patch(p)), p)
 
 
 class ApplyTests(unittest.TestCase):
@@ -153,10 +180,19 @@ class ApplyTests(unittest.TestCase):
     def test_no_trailing_newline_mismatch(self):
         # patch expects no trailing newline, file has one -> no exact match
         patch = ("--- a/f\n+++ b/f\n@@ -1 +1 @@\n"
-                 "-old\n\\ No newline at end of file\n"
-                 "+new\n\\ No newline at end of file\n")
+                "-old\n\\ No newline at end of file\n"
+                "+new\n\\ No newline at end of file\n")
         with self.assertRaises(ApplyError):
             self.apply("old\n", patch)
+
+    def test_pure_insertion_at_eof_without_newline(self):
+        # insert after the last line of a file that has no final newline;
+        # the missing newline must not push the match one line outward
+        patch = "--- a/f\n+++ b/f\n@@ -1,0 +2 @@\n+inserted\n"
+        out, reports = apply_to_text("a", parse_patch(patch).files[0])
+        self.assertEqual(out, "a\ninserted\n")
+        self.assertEqual(reports[0].applied_at, 2)
+        self.assertEqual(reports[0].offset, 0)
 
     def test_crlf_target_lf_patch(self):
         patch = make_patch(["a", "b", "c"], ["a", "B", "c"])

@@ -114,8 +114,13 @@ def _locate(lines: list[str], ends_with_eol: bool, hunk: Hunk,
             return False
         if lines[pos:pos + n] != old:
             return False
-        # if the hunk consumes the file tail, the final-newline state must match
-        if pos + n == len(lines) and ends_with_eol == hunk.old_no_eol:
+        # if the hunk consumes old content at the file tail, the
+        # final-newline state of that content must match; a pure insertion
+        # (n == 0) consumes nothing, so the file's tail state never rules the
+        # insertion point out (otherwise an insertion after the last line of
+        # a no-newline file is wrongly rejected and drifts one line up).
+        if (n > 0 and pos + n == len(lines)
+                and ends_with_eol == hunk.old_no_eol):
             return False
         return True
 
