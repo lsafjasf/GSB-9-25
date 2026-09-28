@@ -18,6 +18,8 @@
     - 下限：alloc_i >= m_i
     - 零权重：w_i == 0  =>  alloc_i == 0
     - 确定性：同输入多次运行结果完全一致
+    - 顺序无关：余数归属只取决于租户属性（小数部分、权重、额度、保障），
+      打乱租户输入顺序不改变分配结果（同权重同属性者份额多重集不变）
 
 复杂度：O(n log n)（排序主导），空间 O(n)。
 """
@@ -57,8 +59,8 @@ def allocate(capacity, weights, demands, minimums=None):
         if weights[i] < 0 or demands[i] < 0 or minimums[i] < 0:
             raise ValueError(f"tenant #{i}: negative weight/demand/minimum")
         if minimums[i] > demands[i]:
-            raise InfeasibleError(
-                demands[i], minimums[i], [(i, minimums[i])]
+            raise ValueError(
+                f"tenant #{i}: minimum {minimums[i]} exceeds demand {demands[i]}"
             )
         if weights[i] == 0 and minimums[i] > 0:
             raise InfeasibleError(
@@ -74,9 +76,9 @@ def allocate(capacity, weights, demands, minimums=None):
     alloc = list(minimums)
     remaining = capacity - total_min
 
-    # 2) 剩余容量注水分配：活跃租户 (索引, 权重, 剩余可分配上限)
+    # 2) 剩余容量注水分配：活跃租户 (索引, 权重, 剩余可分配上限, 最小保障)
     active = [
-        (i, weights[i], demands[i] - minimums[i])
+        (i, weights[i], demands[i] - minimums[i], minimums[i])
         for i in range(n)
         if weights[i] > 0 and demands[i] > minimums[i]
     ]
@@ -95,35 +97,38 @@ def _waterfill(remaining, active):
     """
     # 按 上限/权重 升序：比值小者先触顶
     ordered = sorted(active, key=lambda t: Fraction(t[2], t[1]))
-    total_weight = sum(w for _, w, _ in active)
+    total_weight = sum(w for _, w, _, _ in active)
     pool = remaining
     level = None  # 最终水位（每单位权重分得的量），Fraction
     saturated = []  # (index, cap)
-    unsaturated = []  # (index, weight)
-    for i, w, cap in ordered:
+    unsaturated = []  # (index, weight, cap, minimum)
+    for i, w, cap, m in ordered:
         # 若当前水位下该租户应得 w * pool/total_weight >= cap，则其触顶
         if Fraction(w) * pool >= Fraction(cap) * total_weight:
             saturated.append((i, cap))
             pool -= cap
             total_weight -= w
         else:
-            unsaturated.append((i, w))
+            unsaturated.append((i, w, cap, m))
     if total_weight > 0:
         level = Fraction(pool, total_weight)
 
-    # 未触顶者按水位取整，余数按确定规则（小数部分降序、索引升序）补齐
+    # 未触顶者按水位取整，余数按确定规则补齐：小数部分降序，并列时依次
+    # 按权重、剩余额度、保障降序，索引升序兜底。余数归属只取决于租户自身
+    # 属性（份额随权重成比例），与租户在输入中的顺序无关；索引仅用于属性
+    # 全同的租户之间兜底，保证确定性。
     result = list(saturated)
     if level is not None:
         floors = []
-        for i, w in unsaturated:
+        for i, w, cap, m in unsaturated:
             exact = w * level
             floor = exact.numerator // exact.denominator
-            floors.append((i, floor, exact - floor))
-        used = sum(c for _, c in saturated) + sum(f for _, f, _ in floors)
+            floors.append((i, w, cap, m, floor, exact - floor))
+        used = sum(c for _, c in saturated) + sum(t[4] for t in floors)
         leftover = remaining - used
-        floors.sort(key=lambda t: (-t[2], t[0]))
+        floors.sort(key=lambda t: (-t[5], -t[1], -t[2], -t[3], t[0]))
         bumped = []
-        for k, (i, floor, frac) in enumerate(floors):
+        for k, (i, w, cap, m, floor, frac) in enumerate(floors):
             amount = floor + (1 if k < leftover else 0)
             bumped.append((i, amount))
         result.extend(bumped)

@@ -1,5 +1,6 @@
-"""不变量断言测试 + 边界情形 + 不可行用例。运行: python3 -m unittest -v"""
+"""不变量断言测试 + 边界情形 + 不可行用例 + 顺序无关性。运行: python3 -m unittest -v"""
 
+import itertools
 import random
 import unittest
 
@@ -94,8 +95,11 @@ class TestInfeasible(unittest.TestCase):
         self.assertIn("deficit=10", str(err))
 
     def test_minimum_exceeds_own_demand(self):
-        with self.assertRaises(InfeasibleError):
+        # 保障大于自身申请量属于非法输入（ValueError），而非容量不可行
+        with self.assertRaises(ValueError):
             allocate(100, [1], [10], [20])
+        with self.assertRaises(ValueError):
+            allocate(100, [1, 1], [10, 50], [0, 60])
 
     def test_zero_weight_with_positive_minimum(self):
         with self.assertRaises(InfeasibleError):
@@ -118,6 +122,60 @@ class TestRandomizedInvariants(unittest.TestCase):
             capacity = rng.randint(sum(minimums), sum(minimums) + 2000)
             alloc = allocate(capacity, weights, demands, minimums)
             assert_invariants(self, capacity, weights, demands, minimums, alloc)
+
+
+class TestOrderIndependence(unittest.TestCase):
+    """余数归属只取决于租户属性（小数部分、权重），与输入顺序无关。"""
+
+    def test_fraction_tie_goes_to_larger_weight(self):
+        # 小数部分并列（均为 0.5）时，余数归权重较大者，而非索引较小者
+        self.assertEqual(allocate(6, [1, 3], [10, 10]), [1, 5])
+        self.assertEqual(allocate(6, [3, 1], [10, 10]), [5, 1])
+
+    def test_equal_weights_permutation_invariant(self):
+        # 同权重同输入：任意打乱租户顺序，分配结果（多重集）不变
+        weights = [1, 1, 1, 1]
+        demands = [200, 150, 100, 50]
+        minimums = [10, 0, 20, 0]
+        capacity = 123
+        alloc = allocate(capacity, weights, demands, minimums)
+        for perm in itertools.permutations(range(4)):
+            w = [weights[i] for i in perm]
+            d = [demands[i] for i in perm]
+            m = [minimums[i] for i in perm]
+            shuffled = allocate(capacity, w, d, m)
+            self.assertEqual(sorted(shuffled), sorted(alloc),
+                             f"permutation {perm} changed the outcome")
+
+    def test_random_permutations_preserve_allocations(self):
+        # 随机用例（含同权重租户）：打乱顺序后
+        # 1) 分配多重集不变；2) 权重唯一的租户份额跟随租户而非位置
+        rng = random.Random(20260929)
+        for _ in range(200):
+            n = rng.randint(2, 8)
+            weights = [rng.choice([0, 1, 1, 2, 3, 5]) for _ in range(n)]
+            demands = [rng.randint(0, 30) for _ in range(n)]
+            minimums = [
+                0 if w == 0 else rng.randint(0, d)
+                for w, d in zip(weights, demands)
+            ]
+            capacity = rng.randint(sum(minimums), sum(minimums) + 100)
+            alloc = allocate(capacity, weights, demands, minimums)
+
+            perm = list(range(n))
+            rng.shuffle(perm)
+            w = [weights[i] for i in perm]
+            d = [demands[i] for i in perm]
+            m = [minimums[i] for i in perm]
+            shuffled = allocate(capacity, w, d, m)
+
+            self.assertEqual(sorted(shuffled), sorted(alloc))
+            for pos, i in enumerate(perm):
+                if weights.count(weights[i]) == 1:
+                    self.assertEqual(shuffled[pos], alloc[i],
+                                     f"unique-weight tenant #{i} got "
+                                     f"{shuffled[pos]} after shuffle, "
+                                     f"was {alloc[i]}")
 
 
 if __name__ == "__main__":
