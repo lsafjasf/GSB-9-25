@@ -2,10 +2,19 @@
 
 运行：python3 test_interp.py [-v]
 """
+import math
 import random
 import unittest
 
-from interp import LinearInterpolator, MonotoneCubicInterpolator
+from interp import (
+    Interpolator,
+    Kernel,
+    LinearInterpolator,
+    MonotoneCubicInterpolator,
+    available_kernels,
+    register_kernel,
+    upsample,
+)
 
 
 # ---------------------------------------------------------------- 工具
@@ -64,6 +73,192 @@ class CatmullRom:
         t2, t3 = t * t, t * t * t
         return ((2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * h * m0
                 + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * h * m1)
+
+
+class NearestKernel(Kernel):
+    """测试用自定义核：最近邻（取区间左端点值，中点右取右端点值）。"""
+
+    name = "nearest_test"
+
+    def build(self, xs, ys):
+        self.xs, self.ys = xs, ys
+
+    def eval_segment(self, i, x):
+        xs, ys = self.xs, self.ys
+        return ys[i] if x - xs[i] < xs[i + 1] - x else ys[i + 1]
+
+
+# ---------------------------------------------------------------- 核可插拔
+
+class TestPluggableKernel(unittest.TestCase):
+    def test_builtin_names_and_aliases(self):
+        self.assertIn("linear", available_kernels())
+        self.assertIn("pchip", available_kernels())
+        xs, ys = [0, 1, 2], [0.0, 2.0, 3.0]
+        by_name = Interpolator(xs, ys, kernel="linear")
+        by_alias = Interpolator(xs, ys, kernel="monotone_cubic")
+        self.assertEqual(by_name(0.5), 1.0)
+        # 默认核与旧类都是 pchip
+        self.assertAlmostEqual(Interpolator(xs, ys)(0.5),
+                               MonotoneCubicInterpolator(xs, ys)(0.5))
+        self.assertAlmostEqual(by_alias(0.5),
+                               Interpolator(xs, ys, kernel="pchip")(0.5))
+
+    def test_kernel_as_class_and_instance(self):
+        xs, ys = [0.0, 1.0, 2.0], [10.0, 20.0, 30.0]
+        f_cls = Interpolator(xs, ys, kernel=NearestKernel)
+        k = NearestKernel()
+        f_obj = Interpolator(xs, ys, kernel=k)
+        self.assertIs(f_obj.kernel, k)
+        for f in (f_cls, f_obj):
+            self.assertEqual(f(0.1), 10.0)
+            self.assertEqual(f(0.6), 20.0)
+            self.assertEqual(f(1.5), 30.0)  # 区间[1,2]中点归右端点
+
+    def test_register_kernel_by_name(self):
+        register_kernel("nearest", NearestKernel)
+        self.assertIn("nearest", available_kernels())
+        f = Interpolator([0.0, 1.0], [5.0, 9.0], kernel="nearest")
+        self.assertEqual(f.batch([0.1, 0.6, 0.9]), [5.0, 9.0, 9.0])
+
+    def test_custom_kernel_must_implement_eval(self):
+        class Bad(Kernel):
+            pass
+        with self.assertRaises(NotImplementedError):
+            Interpolator([0.0, 1.0], [0.0, 1.0], kernel=Bad)(0.5)
+
+    def test_invalid_kernel(self):
+        with self.assertRaises(ValueError):
+            Interpolator([0, 1], [0, 1], kernel="cubic_spline_xyz")
+        with self.assertRaises(TypeError):
+            Interpolator([0, 1], [0, 1], kernel=123)
+        with self.assertRaises(TypeError):
+            Interpolator([0, 1], [0, 1], kernel=object())
+        with self.assertRaises(TypeError):
+            register_kernel("bad", object)
+        with self.assertRaises(ValueError):
+            register_kernel("", NearestKernel)
+
+
+# ---------------------------------------------------------------- 批量上采样
+
+def _make_grid(xs, rng):
+    """构造覆盖内点、端点和两侧外推的目标网格（含非等距、跨数量级）。"""
+    lo, hi = xs[0], xs[-1]
+    grid = []
+    grid.extend([lo, hi, (lo + hi) / 2.0])          # 端点 + 中点
+    for i in range(len(xs) - 1):                     # 每段随机多点
+        a, b = xs[i], xs[i + 1]
+        for _ in range(7):
+            grid.append(a + (b - a) * rng.random())
+    span = hi - lo or 1.0
+    grid.extend([lo - 0.5 * span, lo - 1e6 * span,   # 两侧极端外推
+                 hi + 0.37 * span, hi + 1e9 * span])
+    grid.extend(xs)                                  # 全部原始节点
+    rng.shuffle(grid)
+    return grid
+
+
+class TestBatch(unittest.TestCase):
+    """批量结果必须与逐点调用逐元素完全相等（同一浮点值，非近似）。"""
+
+    TRIALS = 120
+
+    def _random_samples(self, rng):
+        n = rng.randint(2, 25)
+        xs, x = [], rng.uniform(-10.0, 10.0)
+        for _ in range(n):
+            xs.append(x)
+            x += rng.uniform(1e-6, 1e3)  # 非等距
+        ys = [rng.uniform(-100.0, 100.0) for _ in range(n)]
+        return xs, ys
+
+    def test_batch_equals_pointwise_random(self):
+        rng = random.Random(20260929)
+        kernels = ("linear", "pchip", NearestKernel)
+        for _ in range(self.TRIALS):
+            xs, ys = self._random_samples(rng)
+            grid = _make_grid(xs, rng)
+            for kernel in kernels:
+                for extrap in ("clamp", "reject", "linear"):
+                    f = Interpolator(xs, ys, kernel=kernel, extrapolate=extrap)
+                    if extrap == "reject":
+                        inner = [x for x in grid if xs[0] <= x <= xs[-1]]
+                        batch, pointwise = f.batch(inner), [f(x) for x in inner]
+                    else:
+                        batch, pointwise = f.batch(grid), [f(x) for x in grid]
+                    self.assertEqual(
+                        batch, pointwise,
+                        f"批量与逐点不一致: kernel={kernel}, extrap={extrap}")
+                    # 长度与顺序一致
+                    self.assertEqual(len(batch), len(inner if extrap == "reject"
+                                                       else grid))
+
+    def test_batch_on_boundary_shapes(self):
+        # 单点插值器：批量全部为常数
+        one = Interpolator([3.5], [7.0])
+        self.assertEqual(one.batch([-1e9, 3.5, 1e9]), [7.0, 7.0, 7.0])
+        # 两点、空网格、乱序网格、含重复位置
+        f = Interpolator([0.0, 10.0], [0.0, 100.0], kernel="linear")
+        self.assertEqual(f.batch([]), [])
+        grid = [10.0, -5.0, 3.0, 3.0, 0.0, 20.0]  # clamp
+        self.assertEqual(f.batch(grid), [f(x) for x in grid])
+        self.assertEqual(f.batch(grid), [100.0, 0.0, 30.0, 30.0, 0.0, 100.0])
+
+    def test_upsample_function_matches(self):
+        rng = random.Random(99)
+        xs = [0.0, 0.01, 0.5, 5.0]       # 非等距
+        ys = [0.0, 2.0, -1.0, 4.0]
+        grid = sorted(-0.1 + 5.2 * k / 200 for k in range(201))
+        for kernel in ("linear", "pchip", NearestKernel):
+            out = upsample(xs, ys, grid, kernel=kernel, extrapolate="linear")
+            ref = [Interpolator(xs, ys, kernel=kernel,
+                                extrapolate="linear")(x) for x in grid]
+            self.assertEqual(out, ref)
+            self.assertEqual(len(out), len(grid))
+            self.assertTrue(all(math.isfinite(v) for v in out))
+        # kwargs 透传：重复横坐标 + last
+        out = upsample([0, 1, 1, 2], [0, 1, 9, 4], [0.5, 1.0, 1.5],
+                       kernel="linear", duplicates="last")
+        self.assertEqual(out, [4.5, 9.0, 6.5])
+
+    def test_batch_invalid_arguments(self):
+        f = Interpolator([0.0, 1.0], [0.0, 1.0])
+        # 标量 / 字符串不是合法网格
+        for bad in (0.5, 3, 3.0, "1.0", None, 1 + 0j):
+            with self.assertRaises(TypeError):
+                f.batch(bad)
+        # 网格含 NaN / inf
+        with self.assertRaises(ValueError):
+            f.batch([0.5, float("nan")])
+        with self.assertRaises(ValueError):
+            f.batch([0.5, float("inf")])
+        with self.assertRaises(ValueError):
+            f.batch([0.5, float("-inf")])
+        # 非数值元素
+        with self.assertRaises(TypeError):
+            f.batch([0.5, "x"])
+        with self.assertRaises(TypeError):
+            f.batch([0.5, True])
+        # 逐点调用仍拒绝非法 x
+        with self.assertRaises(ValueError):
+            f(float("nan"))
+        with self.assertRaises(TypeError):
+            f([0.5])  # list 必须走 batch
+
+    def test_upsample_invalid_construction(self):
+        with self.assertRaises(ValueError):  # 空采样
+            upsample([], [], [0.5])
+        with self.assertRaises(ValueError):  # 长度不一致
+            upsample([0, 1], [0], [0.5])
+        with self.assertRaises(ValueError):  # 重复横坐标默认报错
+            upsample([0, 1, 1], [0, 1, 2], [0.5])
+        with self.assertRaises(ValueError):  # 越界 reject
+            upsample([0, 1], [0, 1], [2.0], extrapolate="reject")
+        with self.assertRaises(ValueError):  # 非法外推策略
+            upsample([0, 1], [0, 1], [0.5], extrapolate="nan")
+        with self.assertRaises(TypeError):  # 网格标量
+            upsample([0, 1], [0, 1], 0.5)
 
 
 # ---------------------------------------------------------------- 性质断言

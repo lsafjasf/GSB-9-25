@@ -1,11 +1,16 @@
 """保形插值库（仅标准库）。
 
-提供：
-- LinearInterpolator        分段线性插值
-- MonotoneCubicInterpolator 分段三次保形插值（Fritsch-Carlson / PCHIP）
-
-共同约定
+核心概念
 --------
+- Kernel（核，可插拔）：决定区间内曲线形状。内置
+    "linear" : 分段线性核（LinearKernel）
+    "pchip"  : 保形分段三次核，Fritsch-Carlson / PCHIP（MonotoneCubicKernel）
+  自定义核：继承 interp.Kernel 并实现 eval_segment(i, x)，需要时覆盖
+  build / slope_lo / slope_hi，然后把类或实例传给 kernel= 参数；
+  也可用 register_kernel 注册后按名字取用。
+- Interpolator：统一插值器，负责排序、重复横坐标、外推与求值。
+  逐点求值 f(x)；批量上采样 f.batch(grid) 或模块函数 upsample(xs, ys, grid)。
+
 横坐标处理（duplicates 参数）：
     "error" : 发现重复横坐标直接抛 ValueError（默认）
     "last"  : 重复横坐标去重，同一 x 取最后出现的 y
@@ -15,31 +20,97 @@
 外推策略（extrapolate 参数）：
     "reject" : 超出 [x0, xn] 抛 ValueError
     "clamp"  : 超出范围时保持端点值（默认；保证永不引入新极值）
-    "linear" : 用端点处切线斜率线性外推（可能越出采样值范围）
+    "linear" : 用核在端点处的斜率线性外推（可能越出采样值范围）
 
 单点输入：任何策略下都返回该点值（常数函数）。
+
+批量一致性：batch/upsample 内部对每个网格点走与 __call__ 完全相同的
+求值路径，因此结果与逐点调用逐元素相等（同一浮点结果，非近似）。
 """
 from __future__ import annotations
 
 import bisect
 import math
 
-__all__ = ["LinearInterpolator", "MonotoneCubicInterpolator"]
+from ._kernels import Kernel, LinearKernel, MonotoneCubicKernel
+
+__all__ = [
+    "Kernel",
+    "Interpolator",
+    "LinearInterpolator",
+    "MonotoneCubicInterpolator",
+    "LinearKernel",
+    "MonotoneCubicKernel",
+    "register_kernel",
+    "available_kernels",
+    "upsample",
+]
 
 _VALID_DUP = ("error", "last", "first")
 _VALID_EXTRAP = ("reject", "clamp", "linear")
+
+# 核注册表：名字 -> Kernel 子类
+_KERNELS = {
+    "linear": LinearKernel,
+    "pchip": MonotoneCubicKernel,
+    "monotone_cubic": MonotoneCubicKernel,  # 语义别名
+}
+
+
+def register_kernel(name, kernel_cls):
+    """注册自定义核，之后可用 Interpolator(xs, ys, kernel=name) 按名字取用。
+
+    kernel_cls 必须是 interp.Kernel 的子类（类本身，不是实例）。
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("核名字必须是非空字符串")
+    if not (isinstance(kernel_cls, type) and issubclass(kernel_cls, Kernel)):
+        raise TypeError("register_kernel 需要一个 Kernel 子类")
+    _KERNELS[name] = kernel_cls
+
+
+def available_kernels():
+    """返回当前可用核名字的列表（含内置核与已注册自定义核）。"""
+    return sorted(_KERNELS)
+
+
+def _resolve_kernel(kernel):
+    """把 kernel 参数解析为一个 Kernel 实例。
+
+    接受：已注册名字（str）、Kernel 子类、Kernel 实例。
+    """
+    if isinstance(kernel, str):
+        if kernel not in _KERNELS:
+            raise ValueError(
+                f"未知核 {kernel!r}；可用核: {available_kernels()}，"
+                f"或传入 Kernel 子类/实例，或用 register_kernel 注册")
+        return _KERNELS[kernel]()
+    if isinstance(kernel, Kernel):
+        return kernel
+    if isinstance(kernel, type) and issubclass(kernel, Kernel):
+        return kernel()
+    raise TypeError(
+        "kernel 必须是已注册核名字(str)、Kernel 子类或 Kernel 实例，"
+        f"得到 {type(kernel).__name__}")
 
 
 def _prepare(xs, ys, duplicates):
     """排序 + 处理重复横坐标，返回 (xs, ys) 升序且无重复。"""
     if duplicates not in _VALID_DUP:
         raise ValueError(f"duplicates 必须是 {_VALID_DUP} 之一, 得到 {duplicates!r}")
+    try:
+        xs = list(xs)
+        ys = list(ys)
+    except TypeError:
+        raise TypeError("xs 与 ys 必须是可迭代的数值序列")
     if len(xs) != len(ys):
         raise ValueError("xs 与 ys 长度不一致")
     if len(xs) == 0:
         raise ValueError("至少需要一个采样点")
     pairs = sorted(zip(xs, ys), key=lambda p: p[0])
     for x, y in pairs:
+        if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+            raise TypeError("xs、ys 的元素必须是 int 或 float")
         if not (math.isfinite(x) and math.isfinite(y)):
             raise ValueError("采样点含 NaN 或 inf")
     if len(pairs) == 1:
@@ -59,26 +130,55 @@ def _prepare(xs, ys, duplicates):
     return out_x, out_y
 
 
-class _Base:
-    def __init__(self, xs, ys, *, extrapolate="clamp", duplicates="error"):
+def _check_scalar(x):
+    """校验逐点求值的横坐标，返回浮点化后的值。"""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise TypeError(f"逐点求值 x 必须是 int/float，得到 {type(x).__name__}")
+    if not math.isfinite(x):
+        raise ValueError(f"x 含 NaN 或 inf: {x!r}")
+    return x
+
+
+def _check_grid(grid):
+    """校验批量目标网格，返回 list；拒绝标量/字符串，元素必须有限数值。"""
+    if isinstance(grid, (str, bytes)) or not hasattr(grid, "__iter__"):
+        raise TypeError(
+            "目标网格必须是数值序列（list/tuple/...）；"
+            f"逐点请用 f(x)，得到 {type(grid).__name__}")
+    try:
+        out = list(grid)
+    except TypeError:
+        raise TypeError("目标网格必须是可迭代的数值序列")
+    for x in out:
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            raise TypeError(f"目标网格元素必须是 int/float，得到 {type(x).__name__}")
+        if not math.isfinite(x):
+            raise ValueError(f"目标网格含 NaN 或 inf: {x!r}")
+    return out
+
+
+class Interpolator:
+    """统一插值器：可插拔核 + 逐点/批量求值。
+
+    参数
+    ----
+    xs, ys : 原始采样序列（不必排序、不必等距）
+    kernel : "linear" / "pchip" / 已注册名字 / Kernel 子类 / Kernel 实例
+    extrapolate : "clamp"（默认）/ "reject" / "linear"
+    duplicates : "error"（默认）/ "last" / "first"
+    """
+
+    def __init__(self, xs, ys, *, kernel="pchip", extrapolate="clamp",
+                 duplicates="error"):
         if extrapolate not in _VALID_EXTRAP:
-            raise ValueError(f"extrapolate 必须是 {_VALID_EXTRAP} 之一, 得到 {extrapolate!r}")
-        self._xs, self._ys = _prepare(list(xs), list(ys), duplicates)
+            raise ValueError(
+                f"extrapolate 必须是 {_VALID_EXTRAP} 之一, 得到 {extrapolate!r}")
+        self._kernel = _resolve_kernel(kernel)
+        self._kernel_name = getattr(self._kernel, "name", "custom")
+        self._xs, self._ys = _prepare(xs, ys, duplicates)
         self._extrapolate = extrapolate
-        self._build()
-
-    # 子类钩子：构造内部系数；在给定区间 i 上求值；端点外推斜率
-    def _build(self):
-        pass
-
-    def _eval_segment(self, i, x):
-        raise NotImplementedError
-
-    def _slope_lo(self):
-        raise NotImplementedError
-
-    def _slope_hi(self):
-        raise NotImplementedError
+        if len(self._xs) >= 2:
+            self._kernel.build(self._xs, self._ys)
 
     @property
     def xs(self):
@@ -88,7 +188,22 @@ class _Base:
     def ys(self):
         return list(self._ys)
 
+    @property
+    def kernel(self):
+        """底层核实例（自定义核可借此访问其预计算状态）。"""
+        return self._kernel
+
+    def point(self, x):
+        """单点求值，带完整参数校验。"""
+        x = _check_scalar(x)
+        return self._eval(x)
+
     def __call__(self, x):
+        """逐点插值：f(x) -> 单个 float。批量请用 batch 或 upsample。"""
+        return self.point(x)
+
+    def _eval(self, x):
+        """内部单点路径；调用前 x 已校验为有限数值。"""
         xs = self._xs
         if len(xs) == 1:
             return self._ys[0]
@@ -97,96 +212,65 @@ class _Base:
                 raise ValueError(f"x={x!r} 超出插值范围 [{xs[0]!r}, {xs[-1]!r}]")
             if self._extrapolate == "clamp":
                 return self._ys[0]
-            return self._ys[0] + self._slope_lo() * (x - xs[0])
+            return self._ys[0] + self._kernel.slope_lo() * (x - xs[0])
         if x > xs[-1]:
             if self._extrapolate == "reject":
                 raise ValueError(f"x={x!r} 超出插值范围 [{xs[0]!r}, {xs[-1]!r}]")
             if self._extrapolate == "clamp":
                 return self._ys[-1]
-            return self._ys[-1] + self._slope_hi() * (x - xs[-1])
+            return self._ys[-1] + self._kernel.slope_hi() * (x - xs[-1])
         i = bisect.bisect_right(xs, x) - 1
         if i >= len(xs) - 1:
             return self._ys[-1]
-        return self._eval_segment(i, x)
+        return self._kernel.eval_segment(i, x)
+
+    def batch(self, grid):
+        """批量上采样：一次对整个目标网格求值，返回等长 list[float]。
+
+        与 [f(x) for x in grid] 逐元素完全相等：每个网格点走同一个
+        _eval 路径（同一份浮点运算），不做矢量化重写、不引入额外误差。
+        """
+        grid = _check_grid(grid)
+        if len(self._xs) == 1:
+            return [self._ys[0]] * len(grid)
+        return [self._eval(x) for x in grid]
+
+    # 兼容旧测试/旧用户：内部别名
+    def _slope_lo(self):
+        return self._kernel.slope_lo()
+
+    def _slope_hi(self):
+        return self._kernel.slope_hi()
 
     def __repr__(self):
-        return (f"{type(self).__name__}(n={len(self._xs)}, "
-                f"range=[{self._xs[0]!r}, {self._xs[-1]!r}], "
+        return (f"{type(self).__name__}(kernel={self._kernel_name!r}, "
+                f"n={len(self._xs)}, range=[{self._xs[0]!r}, {self._xs[-1]!r}], "
                 f"extrapolate={self._extrapolate!r})")
 
 
-class LinearInterpolator(_Base):
-    """分段线性插值。天然不越出相邻采样点范围、保持单调性。"""
+def upsample(xs, ys, grid, *, kernel="pchip", extrapolate="clamp",
+             duplicates="error"):
+    """批量上采样：原始采样序列 (xs, ys) + 目标网格 grid -> 插值结果 list。
 
-    def _eval_segment(self, i, x):
-        x0, x1 = self._xs[i], self._xs[i + 1]
-        y0, y1 = self._ys[i], self._ys[i + 1]
-        t = (x - x0) / (x1 - x0)
-        return y0 + t * (y1 - y0)
-
-    def _slope_lo(self):
-        return (self._ys[1] - self._ys[0]) / (self._xs[1] - self._xs[0])
-
-    def _slope_hi(self):
-        return (self._ys[-1] - self._ys[-2]) / (self._xs[-1] - self._xs[-2])
-
-
-class MonotoneCubicInterpolator(_Base):
-    """Fritsch-Carlson 保形分段三次 Hermite 插值（PCHIP）。
-
-    每个区间是三次 Hermite 样条，节点斜率按 Fritsch-Carlson 规则选取：
-    相邻割线异号（局部极值）时斜率取 0，否则取割线的加权调和平均。
-    保证：
-      1. 每个区间内的值不越出该区间两端采样点的范围（零过冲）；
-      2. 采样点单调（非降/非升）时插值结果同样单调。
+    等价于 Interpolator(xs, ys, kernel=..., ...).batch(grid)，适合一次插出
+    整条曲线。返回与 grid 等长的 list[float]，与逐点调用
+    [Interpolator(xs, ys, ...)(x) for x in grid] 逐元素完全相等。
     """
+    return Interpolator(xs, ys, kernel=kernel, extrapolate=extrapolate,
+                        duplicates=duplicates).batch(grid)
 
-    def _build(self):
-        xs, ys = self._xs, self._ys
-        n = len(xs)
-        if n < 2:
-            self._m = [0.0]
-            return
-        h = [xs[i + 1] - xs[i] for i in range(n - 1)]
-        d = [(ys[i + 1] - ys[i]) / h[i] for i in range(n - 1)]
-        m = [0.0] * n
-        # 内部节点：Fritsch-Carlson
-        for i in range(1, n - 1):
-            if d[i - 1] * d[i] <= 0.0:
-                m[i] = 0.0
-            else:
-                w1 = 2.0 * h[i] + h[i - 1]
-                w2 = h[i] + 2.0 * h[i - 1]
-                m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i])
-        # 端点：非中心三点公式 + 限幅（PCHIP 标准做法）
-        m[0] = self._edge_slope(h[0], h[1], d[0], d[1]) if n > 2 else d[0]
-        m[-1] = self._edge_slope(h[-1], h[-2], d[-1], d[-2]) if n > 2 else d[-1]
-        self._m = m
 
-    @staticmethod
-    def _edge_slope(h0, h1, d0, d1):
-        m = ((2.0 * h0 + h1) * d0 - h0 * d1) / (h0 + h1)
-        if m * d0 <= 0.0:
-            return 0.0
-        if d0 * d1 < 0.0 and abs(m) > 3.0 * abs(d0):
-            return 3.0 * d0
-        return m
+class LinearInterpolator(Interpolator):
+    """向后兼容：分段线性插值器（等价于 Interpolator(..., kernel="linear")）。"""
 
-    def _eval_segment(self, i, x):
-        x0, x1 = self._xs[i], self._xs[i + 1]
-        y0, y1 = self._ys[i], self._ys[i + 1]
-        m0, m1 = self._m[i], self._m[i + 1]
-        h = x1 - x0
-        t = (x - x0) / h
-        t2, t3 = t * t, t * t * t
-        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
-        h10 = t3 - 2.0 * t2 + t
-        h01 = -2.0 * t3 + 3.0 * t2
-        h11 = t3 - t2
-        return h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1
+    def __init__(self, xs, ys, *, extrapolate="clamp", duplicates="error"):
+        super().__init__(xs, ys, kernel="linear", extrapolate=extrapolate,
+                         duplicates=duplicates)
 
-    def _slope_lo(self):
-        return self._m[0]
 
-    def _slope_hi(self):
-        return self._m[-1]
+class MonotoneCubicInterpolator(Interpolator):
+    """向后兼容：保形分段三次插值器（等价于 Interpolator(..., kernel="pchip")）。"""
+
+    def __init__(self, xs, ys, *, extrapolate="clamp", duplicates="error"):
+        super().__init__(xs, ys, kernel="pchip", extrapolate=extrapolate,
+                         duplicates=duplicates)
