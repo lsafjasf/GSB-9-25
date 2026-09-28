@@ -88,6 +88,65 @@ class TimeoutIsolationTest(unittest.TestCase):
         ch.close()
 
 
+class TimeoutRaceTest(unittest.TestCase):
+    def test_response_racing_timeout_yields_single_consistent_outcome(self):
+        # Force the interleaving where the responder has already removed the
+        # entry and bumped the success counter, but the caller's timeout
+        # fires before the result is published. The two must agree: either
+        # caller gets the result AND stats count a success, or caller times
+        # out AND stats count a timeout.
+        ch, c = make(latency=0.05)
+        h = c.submit("x")
+        entry = c._pending[h.request_id]
+
+        entered = threading.Event()    # responder is inside event.set()
+        open_gate = threading.Event()  # test lets the responder finish
+        real_event = entry.event
+
+        class GatedEvent:
+            def wait(self, timeout=None):
+                return real_event.wait(timeout)
+
+            def is_set(self):
+                return real_event.is_set()
+
+            def set(self):
+                entered.set()
+                open_gate.wait(2.0)
+                real_event.set()
+
+        entry.event = GatedEvent()
+
+        outcome = {}
+
+        def caller():
+            try:
+                outcome["result"] = h.result(0.2)
+            except RequestTimeout:
+                outcome["timeout"] = True
+
+        t = threading.Thread(target=caller)
+        t.start()
+        self.assertTrue(entered.wait(2.0), "responder must reach event.set()")
+        time.sleep(0.4)  # caller's 0.2s timeout fires while responder is held
+        open_gate.set()
+        t.join(2.0)
+        self.assertFalse(t.is_alive(), "caller must be released")
+
+        if outcome.get("timeout"):
+            self.assertEqual(
+                c.stats.timed_out, 1,
+                "caller recorded a timeout but stats did not")
+            self.assertEqual(
+                c.stats.succeeded, 0,
+                "caller recorded a timeout yet stats counted a success")
+        else:
+            self.assertEqual(outcome["result"], "x")
+            self.assertEqual(c.stats.succeeded, 1)
+            self.assertEqual(c.stats.timed_out, 0)
+        ch.close()
+
+
 class StrayResponseTest(unittest.TestCase):
     def test_unknown_id_counted(self):
         ch, c = make()

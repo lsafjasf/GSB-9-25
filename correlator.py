@@ -163,8 +163,8 @@ class Correlator:
                 return False
             self._tombstone_locked(request_id, "cancelled")
             self.stats.cancelled += 1
-        entry.error = RequestCancelled(f"request {request_id} cancelled")
-        entry.event.set()
+            entry.error = RequestCancelled(f"request {request_id} cancelled")
+            entry.event.set()
         self._release_slot(entry)
         return True
 
@@ -177,6 +177,8 @@ class Correlator:
             if entry is not None:
                 self._tombstone_locked(request_id, "done")
                 self.stats.succeeded += 1
+                entry.result = msg.get("payload")
+                entry.event.set()
             else:
                 tomb = self._tombstones.get(request_id)
                 if tomb is None:
@@ -186,8 +188,6 @@ class Correlator:
                 else:
                     self.stats.late += 1
                 return
-        entry.result = msg.get("payload")
-        entry.event.set()
         self._release_slot(entry)
 
     # -- disconnect / reconnect ---------------------------------------------
@@ -233,8 +233,8 @@ class Correlator:
                 return
             self._tombstone_locked(entry.request_id, "failed")
             self.stats.failed += 1
-        entry.error = exc
-        entry.event.set()
+            entry.error = exc
+            entry.event.set()
         self._release_slot(entry)
 
     def _release_slot(self, entry):
