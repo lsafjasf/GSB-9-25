@@ -65,6 +65,22 @@ class TestParse(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_path("M 0 0 A 1 1 0 0 1 2 2")  # 圆弧不支持，明确报错
 
+    def test_command_missing_args_is_error(self):
+        # 命令缺参数：L 后一个数都没有就跟了下一条命令 H。修复前内层取数循环
+        # 一次不转，L 被静默丢弃，包围盒少算一段。
+        with self.assertRaisesRegex(ValueError, r"'L'.*expects 2 numbers"):
+            parse_path("M 0 0 L H 5")
+        # 命令给了一部分参数（串尾只剩 1 个数）同样必须明确报错。
+        with self.assertRaisesRegex(ValueError, r"'L'.*expects 2 numbers"):
+            parse_path("M 0 0 L 10 10 5")
+
+    def test_command_no_args_is_error(self):
+        # 命令无参数：命令后什么参数都没有（串尾）。修复前静默返回空段/部分段。
+        with self.assertRaisesRegex(ValueError, r"'L'.*expects 2 numbers"):
+            parse_path("M 0 0 L")
+        with self.assertRaisesRegex(ValueError, r"'M'.*expects 2 numbers"):
+            parse_path("M")
+
 
 class TestBBox(unittest.TestCase):
     def test_quad_exact_extremum(self):

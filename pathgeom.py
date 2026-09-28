@@ -265,6 +265,11 @@ def parse_path(d):
             raise ValueError("unsupported command %r (arcs A/a not supported)" % cmd)
         rel = cmd.islower()
         arity = _ARG_COUNT[c]
+        # 命令级最小参数校验必须先于取数：命令后一个参数都没有时（串尾或紧跟
+        # 下一条命令字母）内层循环一次都不会转，循环内的检查无法触发。
+        if i >= n or tokens[i].isalpha():
+            raise ValueError(
+                "command %r expects %d numbers, got none" % (cmd, arity))
         first_moveto = True
         while i < n and not tokens[i].isalpha():
             if i + arity > n or any(tokens[i + k].isalpha() for k in range(arity)):
