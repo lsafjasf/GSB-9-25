@@ -156,6 +156,15 @@ def apply_file_patch(fp: FilePatch, content: str,
                 searched_offset=config.max_offset,
             )
         new = [_Line(l.text, l.has_newline) for l in hunk.new_lines]
+        # A pure-insertion hunk at end of a file whose last line lacks a
+        # terminator would otherwise glue the first inserted line onto that
+        # last line: terminate the preceding line before splicing.  The added
+        # terminator uses the file's existing EOL style (see ``_join``), so a
+        # LF target stays LF and a CRLF target stays CRLF.  When ``old`` is
+        # non-empty the matched region implies the preceding line already ends
+        # with a newline, so this only changes the unterminated-tail case.
+        if new and pos > 0 and not buf[pos - 1].has_newline:
+            buf[pos - 1].has_newline = True
         buf[pos:pos + len(old)] = new
         shift += (len(new) - len(old)) + (pos - expected)
     return _join(buf, eol)

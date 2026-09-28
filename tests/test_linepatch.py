@@ -202,6 +202,28 @@ class TestApply(unittest.TestCase):
         out = apply_file_patch(patch.files[0], "keep\na\nb\n")
         self.assertEqual(out, "keep\n")
 
+    def test_pure_insert_after_unterminated_last_line(self):
+        # target file has no newline at EOF and the hunk is a pure insertion
+        # (old_count == 0) after the last line: the existing last line must
+        # be terminated before splicing, otherwise it glues onto the first
+        # added line.  Output line count/content and EOL style are asserted.
+        patch = parse_patch("--- a/f\n+++ b/f\n@@ -2,0 +3,2 @@\n"
+                            "+gamma\n+delta\n")
+        out = apply_file_patch(patch.files[0], "alpha\nbeta")
+        self.assertEqual(out, "alpha\nbeta\ngamma\ndelta\n")
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines, ["alpha", "beta", "gamma", "delta"])
+        # a CRLF target must keep CRLF for every line, including the one
+        # whose terminator had to be synthesised
+        out_crlf = apply_file_patch(patch.files[0], "alpha\r\nbeta")
+        self.assertEqual(out_crlf,
+                         "alpha\r\nbeta\r\ngamma\r\ndelta\r\n")
+        lines_crlf = out_crlf.split("\r\n")
+        self.assertEqual(len(lines_crlf), 5)
+        self.assertEqual(lines_crlf,
+                         ["alpha", "beta", "gamma", "delta", ""])
+
 
 class TestFilesystem(unittest.TestCase):
     def test_missing_target(self):
