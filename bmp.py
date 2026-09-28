@@ -3,7 +3,10 @@
 Supported subset (a common uncompressed bitmap format):
   - Windows BMP ("BM" magic), BITMAPINFOHEADER (>= 40 bytes)
   - 24-bit and 32-bit pixels, BI_RGB (uncompressed) only
-  - Row stride padded to 4 bytes (padding is always emitted as zero)
+  - Row stride padded to 4 bytes; on a loads() -> dumps() round-trip the
+    original padding bytes (including any non-zero contents) are restored
+    verbatim. Padding is emitted as zero only for freshly constructed or
+    re-geometryed images.
   - Bottom-up (positive height) and top-down (negative height) row order
 
 Pixel storage: `BMPImage.pixels` is a bytearray in *logical top-down*
@@ -11,6 +14,19 @@ row-major order, tightly packed (no padding), channels in file order
 (B, G, R [, X]).  For 32-bit images the 4th byte (reserved/alpha) is
 carried through verbatim on round-trip and interpolated like any other
 channel when scaling.
+
+Header / metadata round-trip
+----------------------------
+`loads` also retains the raw bytes before the pixel area (file header,
+full DIB header and any gap/palette bytes), the padding byte of every
+row, and any bytes following the pixel area.  When geometry (width,
+height, bpp, orientation) is unchanged, `dumps` reproduces the input
+byte-for-byte, including non-zero row padding, the resolution fields
+(biXPelsPerMeter/biYPelsPerMeter), reserved fields, biSizeImage and any
+trailing bytes.  Resizing (or building a `BMPImage` by hand) is a
+normalising operation: the informational header fields are carried over
+from the source when available, but row padding is rewritten as zero and
+size fields are recomputed.
 
 Scaling boundary rules
 ----------------------
@@ -76,6 +92,12 @@ class BMPImage:
     bpp: int
     pixels: bytearray
     top_down: bool = False
+    # Raw source metadata used to make loads()->dumps() byte-exact:
+    # bytes preceding the pixel area, per-logical-row padding bytes,
+    # and bytes following the pixel area. Empty for hand-built images.
+    _preamble: bytes = b""
+    _row_pad: tuple[bytes, ...] = ()
+    _postscript: bytes = b""
 
     @property
     def bytes_per_pixel(self) -> int:
@@ -162,10 +184,13 @@ def loads(data: bytes) -> BMPImage:
 
     row_bytes = width * (bpp // 8)
     pixels = bytearray(row_bytes * height)
+    row_pad = [b""] * height
     for row in range(height):
         src = pixel_offset + row * stride
         dst = row * row_bytes
         pixels[dst : dst + row_bytes] = data[src : src + row_bytes]
+        logical_row = row if top_down else height - 1 - row
+        row_pad[logical_row] = bytes(data[src + row_bytes : src + stride])
     if not top_down:
         # File stores rows bottom-up; normalise to logical top-down.
         flipped = bytearray(len(pixels))
@@ -174,7 +199,16 @@ def loads(data: bytes) -> BMPImage:
             flipped[row * row_bytes : (row + 1) * row_bytes] = pixels[src : src + row_bytes]
         pixels = flipped
 
-    return BMPImage(width=width, height=height, bpp=bpp, pixels=pixels, top_down=top_down)
+    return BMPImage(
+        width=width,
+        height=height,
+        bpp=bpp,
+        pixels=pixels,
+        top_down=top_down,
+        _preamble=bytes(data[:pixel_offset]),
+        _row_pad=tuple(row_pad),
+        _postscript=bytes(data[pixel_offset + needed :]),
+    )
 
 
 def load(path: str) -> BMPImage:
@@ -197,6 +231,60 @@ def dumps(img: BMPImage) -> bytes:
 
     stride = _row_stride(img.width, img.bpp)
     image_size = stride * img.height
+    pad_len = stride - row_bytes
+    rows = range(img.height) if img.top_down else range(img.height - 1, -1, -1)
+
+    preamble = bytes(img._preamble)
+    postscript = bytes(img._postscript)
+
+    if preamble:
+        # Re-serialise against the original raw header. The pixel offset
+        # is wherever the source pixel area actually began (any gap bytes
+        # between the DIB header and the pixels are part of the preamble).
+        pixel_offset = len(preamble)
+        header = bytearray(preamble)
+        orig_width, orig_height_raw = struct.unpack_from("<ii", header, 18)
+        (orig_bpp,) = struct.unpack_from("<H", header, 28)
+        signed_height = -img.height if img.top_down else img.height
+        same_geometry = (
+            orig_width == img.width
+            and orig_height_raw == signed_height
+            and orig_bpp == img.bpp
+        )
+
+        if same_geometry:
+            # Byte-exact path: keep every header/trailing byte and restore
+            # the original padding of each row (even if non-zero).
+            out = bytearray(header)
+            for row in rows:
+                start = row * row_bytes
+                out += img.pixels[start : start + row_bytes]
+                if len(img._row_pad) == img.height:
+                    out += img._row_pad[row]
+                else:
+                    out += b"\x00" * pad_len
+            out += postscript
+            return bytes(out)
+
+        # Geometry changed: keep informational metadata (resolution,
+        # colours, header extensions, gap bytes) but fix the fields that
+        # describe the new pixel layout; padding is normalised to zero.
+        struct.pack_into("<ii", header, 18, img.width, signed_height)
+        struct.pack_into("<H", header, 28, img.bpp)
+        struct.pack_into("<I", header, 34, image_size)
+        file_size = pixel_offset + image_size + len(postscript)
+        struct.pack_into("<I", header, 2, file_size)
+
+        out = bytearray(header)
+        pad = b"\x00" * pad_len
+        for row in rows:
+            start = row * row_bytes
+            out += img.pixels[start : start + row_bytes]
+            out += pad
+        out += postscript
+        return bytes(out)
+
+    # Hand-built image with no source header: emit the canonical header.
     pixel_offset = _FILE_HEADER_SIZE + _MIN_INFO_HEADER_SIZE
     file_size = pixel_offset + image_size
 
@@ -216,8 +304,7 @@ def dumps(img: BMPImage) -> bytes:
         0,
         0,
     )
-    pad = b"\x00" * (stride - row_bytes)
-    rows = range(img.height) if img.top_down else range(img.height - 1, -1, -1)
+    pad = b"\x00" * pad_len
     for row in rows:
         start = row * row_bytes
         out += img.pixels[start : start + row_bytes]
@@ -252,7 +339,15 @@ def resize_nearest(img: BMPImage, new_width: int, new_height: int) -> BMPImage:
             s = src_row + sx * bpp
             d = dst_row + x * bpp
             out[d : d + bpp] = src[s : s + bpp]
-    return BMPImage(new_width, new_height, img.bpp, out, img.top_down)
+    return BMPImage(
+        new_width,
+        new_height,
+        img.bpp,
+        out,
+        img.top_down,
+        _preamble=img._preamble,
+        _postscript=img._postscript,
+    )
 
 
 def resize_bilinear(img: BMPImage, new_width: int, new_height: int) -> BMPImage:
@@ -299,4 +394,12 @@ def resize_bilinear(img: BMPImage, new_width: int, new_height: int) -> BMPImage:
                 bot = src[p10 + c] * wx0 + src[p11 + c] * wx1
                 value = (top * wy0 + bot * wy1 + 32768) >> 16
                 out[d + c] = value
-    return BMPImage(new_width, new_height, img.bpp, out, img.top_down)
+    return BMPImage(
+        new_width,
+        new_height,
+        img.bpp,
+        out,
+        img.top_down,
+        _preamble=img._preamble,
+        _postscript=img._postscript,
+    )

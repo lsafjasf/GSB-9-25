@@ -83,6 +83,90 @@ class RoundTripTests(unittest.TestCase):
         first_logical = bytes(img_td.pixels[:row_bytes])
         self.assertEqual(blob_td[54 : 54 + row_bytes], first_logical)
 
+    def test_roundtrip_nonzero_padding_and_custom_resolution(self):
+        # 3x2 @24bpp -> each row is 9 data bytes + 3 non-zero pad bytes.
+        width, height, bpp = 3, 2, 24
+        row_bytes, stride = width * 3, 12
+        xppm, yppm = 6000, 12000  # ~152 / 305 DPI, deliberately non-default
+        reserved1, reserved2 = 0x4242, 0xBEAF
+        pixel_offset = 54
+        logical = make_pixels(width, height, bpp, seed=123)
+        tail = b"TAIL-BYTES-AFTER-PIXELS"
+        # Padding indexed by logical row; file below is bottom-up.
+        pad = {0: b"\xAA\xAA\xAA", 1: b"\xBB\xBB\xBB"}
+
+        header = bytearray()
+        header += struct.pack(
+            "<2sIHHI",
+            b"BM",
+            pixel_offset + stride * height + len(tail),
+            reserved1,
+            reserved2,
+            pixel_offset,
+        )
+        header += struct.pack(
+            "<IiiHHIIiiII",
+            40,
+            width,
+            height,  # positive -> bottom-up
+            1,
+            bpp,
+            0,
+            stride * height,
+            xppm,
+            yppm,
+            0,
+            0,
+        )
+        body = bytearray()
+        for file_row in range(height - 1, -1, -1):
+            start = file_row * row_bytes
+            body += logical[start : start + row_bytes]
+            body += pad[file_row]
+        blob = bytes(header) + bytes(body) + tail
+
+        img = bmp.loads(blob)
+        self.assertEqual(bytes(img.pixels), bytes(logical))
+        # The non-zero padding bytes survive, keyed by logical row.
+        self.assertEqual(img._row_pad, (b"\xAA\xAA\xAA", b"\xBB\xBB\xBB"))
+
+        # Byte-exact round-trip from raw bytes.
+        self.assertEqual(bmp.dumps(img), blob)
+        # And again from a re-decoded image.
+        self.assertEqual(bmp.dumps(bmp.loads(bmp.dumps(img))), blob)
+
+        # Resolution / reserved fields visible in the reproduced header.
+        rt = bmp.dumps(img)
+        self.assertEqual(struct.unpack_from("<ii", rt, 38), (xppm, yppm))
+        self.assertEqual(struct.unpack_from("<HH", rt, 6), (reserved1, reserved2))
+        self.assertEqual(rt[54 + 9 : 54 + 12], b"\xBB\xBB\xBB")  # file row 1
+        self.assertEqual(rt[54 + stride + 9 : 54 + stride + 12], b"\xAA\xAA\xAA")
+        self.assertTrue(rt.endswith(tail))
+
+    def test_resize_normalises_padding_but_keeps_resolution(self):
+        width, height, bpp = 3, 2, 24
+        xppm, yppm = 6000, 12000
+        stride = 12
+        blob = bytearray()
+        blob += struct.pack("<2sIHHI", b"BM", 54 + stride * height, 1, 2, 54)
+        blob += struct.pack(
+            "<IiiHHIIiiII", 40, width, height, 1, bpp, 0,
+            stride * height, xppm, yppm, 0, 0,
+        )
+        for file_row in range(height - 1, -1, -1):
+            blob += bytes([file_row * 10 + c for c in range(9)])
+            blob += b"\xCC\xCC\xCC"
+
+        resized = bmp.resize_nearest(bmp.loads(bytes(blob)), 5, 4)
+        out = bmp.dumps(resized)
+        new_stride = 16  # 5*3=15 -> padded to 16
+        self.assertEqual(len(out), 54 + new_stride * 4)
+        # Resolution metadata is carried through...
+        self.assertEqual(struct.unpack_from("<ii", out, 38), (xppm, yppm))
+        # ...but padding of the new geometry is normalised to zero.
+        for file_row in range(4):
+            self.assertEqual(out[54 + file_row * new_stride + 15], 0)
+
 
 class CorruptInputTests(unittest.TestCase):
     def corrupt(self, blob, offset, fmt, *values):
