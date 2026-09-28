@@ -10,6 +10,9 @@ selftest.py — intcodec 对拍自测脚本（仅标准库，零依赖）。
   4) AUTO 模式劣化回退检查（随机数据上 AUTO 不应选 COMBO）。
   5) 坏帧拒绝检查。
   6) 长度 1,000,000 的序列耗时与往返校验。
+  7) 分块自适应：与整段模式对拍（同一序列分块/整段解码逐元素一致）、
+     固定/自适应/显式区间三种切分、单块帧与整帧等价。
+  8) 块表损坏：错误信息必须带可定位的块序号与字节偏移。
 
 运行：python3 selftest.py
 """
@@ -86,6 +89,15 @@ def check(cond, msg):
         FAILURES.append(msg)
         print("FAIL  %s" % msg)
 
+
+def check_raises(fn, needle, msg):
+    """fn 必须抛 CodecError 且信息包含 needle（用于块表损坏定位检查）。"""
+    try:
+        fn()
+    except ic.CodecError as exc:
+        check(needle in str(exc), "%s（报错: %s）" % (msg, exc))
+        return
+    check(False, "%s（未抛 CodecError）" % msg)
 
 # --------------------------------------------------------------------------
 # 1. 参考实现对拍（变换层）
@@ -318,6 +330,109 @@ def main():
     blob_raw = ic.serialize(ic.RAW, big)
     t_raw = time.perf_counter() - t
     print("     对照 RAW 编码时间戳序列：%.3fs" % t_raw)
+
+    print("== 6. 分块自适应：与整段模式对拍 ==")
+    rng_master = random.Random(20260929)
+    for name, fn in GENERATORS.items():
+        for trial in range(4):
+            seed = rng_master.randrange(1 << 63)
+            rng = random.Random(seed)
+            n = rng.choice([0, 1, 2, 3, 7, 31, 127, 1000, 4096])
+            seq = fn(rng, n)
+            n = len(seq)  # 个别生成器对 n=0 仍产出 1 元素，以实际长度为准
+            tag = "%s/trial%d/n%d" % (name, trial, n)
+            whole = ic.decode(ic.encode_auto(seq)[0])
+            check(whole == list(seq), "[%s] 整段 AUTO 基准一致" % tag)
+            for cfg, kw in [("fixed7", {"chunk_size": 7}),
+                            ("fixed128", {"chunk_size": 128}),
+                            ("fixed1M", {"chunk_size": max(1, n)}),
+                            ("adaptive64", {"adaptive": True, "block_size": 64}),
+                            ("adaptive512", {"adaptive": True, "block_size": 512})]:
+                blob, rep = ic.encode_chunked(seq, **kw)
+                got = ic.decode(blob)
+                check(got == whole,
+                      "[%s] 分块(%s, %d块) 与整段解码逐元素一致"
+                      % (tag, cfg, rep["chunks"]))
+                check(ic.decoded_mode(blob) == ic.CHUNKED,
+                      "[%s] 分块(%s) 帧头模式为 CHUNKED" % (tag, cfg))
+                # 块表可独立解析且覆盖全序列
+                entries = ic.parse_chunk_table(blob)
+                check(sum(e["elem_count"] for e in entries) == n,
+                      "[%s] 分块(%s) 块表元素总数 == n" % (tag, cfg))
+
+    # 单块帧：分块帧退化为单块时，块内模式与整段 analyze 选择一致
+    for tag, seq, _ in edge_cases:
+        if not seq:
+            continue
+        blob, rep = ic.encode_chunked(seq, chunk_size=len(seq))
+        whole_mode = ic.analyze(seq)["mode"]
+        entry = ic.parse_chunk_table(blob)[0]
+        check(rep["chunks"] == 1 and entry["mode"] == whole_mode,
+              "[%s] 单块帧模式与整段选择一致(%s)" % (tag, ic.MODE_NAMES[whole_mode]))
+        check(ic.decode(blob) == ic.decode(ic.serialize(whole_mode, seq)),
+              "[%s] 单块帧与整段帧解码一致" % tag)
+
+    # 显式区间切分 + 非法区间拒绝
+    seq = gen_random_walk(random.Random(1), 1000)
+    spans = [(0, 300), (300, 301), (301, 1000)]
+    blob = ic.serialize_chunked(seq, spans=spans)
+    check(ic.decode(blob) == seq, "显式区间分块往返一致")
+    check_raises(lambda: ic.serialize_chunked(seq, spans=[(0, 500), (499, 1000)]),
+                 "块#1", "重叠区间被拒绝并定位块号")
+    check_raises(lambda: ic.serialize_chunked(seq, spans=[(0, 999)]),
+                 "覆盖", "未覆盖全序列被拒绝")
+    check_raises(lambda: ic.serialize_chunked(seq, spans=[(0, 1001)]),
+                 "块#0", "区间越界被拒绝并定位块号")
+
+    print("== 7. 块表损坏：错误可定位 ==")
+    seq = (gen_timestamps(random.Random(2), 500)
+           + [42] * 500
+           + gen_random_mixed(random.Random(3), 500))
+    blob, rep = ic.encode_chunked(seq, chunk_size=100)
+    entries = ic.parse_chunk_table(blob)
+    check(rep["chunks"] == 15, "分块数符合预期(15块)")
+
+    # 7.1 篡改第 3 块的模式字节
+    bad = bytearray(blob)
+    off = entries[3]["table_offset"]
+    bad[off] = 9
+    check_raises(lambda: ic.decode(bytes(bad)), "块#3",
+                 "块#3 模式字节损坏 → 报错含块号与偏移")
+    # 7.2 篡改末块的 body_len（放大 → 末块 body 越界）
+    bad = bytearray(blob)
+    off = entries[-1]["table_offset"]
+    pos = ic.read_uvarint(blob, off + 1)[1]  # 跳过 elem_count，定位 body_len 字段
+    bad[pos] = 0xFF
+    check_raises(lambda: ic.decode(bytes(bad)), "块#14",
+                 "末块 body_len 篡改 → 报错定位到末块")
+    # 7.3 篡改第 0 块元素数为 0
+    bad = bytearray(blob)
+    bad[entries[0]["table_offset"] + 1] = 0
+    check_raises(lambda: ic.decode(bytes(bad)), "块#0",
+                 "块#0 元素数非法 → 报错含块号")
+    # 7.4 块表截断（只保留前 2 个表项）
+    cut = entries[2]["table_offset"]
+    check_raises(lambda: ic.decode(blob[:cut]), "块#2",
+                 "块表截断 → 报错定位到缺失的块#2")
+    # 7.5 帧尾截断（body 缺失）
+    check_raises(lambda: ic.decode(blob[:-10]), "块#14",
+                 "末块 body 截断 → 报错定位到最后一块")
+    # 7.6 帧尾多余字节
+    check_raises(lambda: ic.decode(blob + b"\x00"), "块表",
+                 "body 总长与帧长不符被拒绝")
+    # 7.7 块 body 内容损坏（翻转第 7 块 body 首字节高位制造非法 varint 链）
+    bad = bytearray(blob)
+    boff = entries[7]["body_offset"]
+    bad[boff] = 0xFF
+    try:
+        ic.decode(bytes(bad))
+        # 0xFF 也可能恰好仍是合法 varint 前缀，此时要求结果必不一致
+        check(False, "块#7 body 损坏必须报错")
+    except ic.CodecError as exc:
+        check("块#7" in str(exc), "块#7 body 损坏 → 报错含块号（%s）" % exc)
+    # 7.8 非分块帧走 parse_chunk_table 报错
+    check_raises(lambda: ic.parse_chunk_table(ic.serialize(ic.RAW, [1, 2])),
+                 "不是分块帧", "对整段帧解析块表被拒绝")
 
     elapsed = time.perf_counter() - t0
     print()

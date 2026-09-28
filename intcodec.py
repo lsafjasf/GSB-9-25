@@ -18,6 +18,15 @@ body:
   RLE   : 游程数 r(uvarint) + r 组 (zigzag 值, uvarint 计数)
   COMBO : 同 RLE，但游程作用在「首值 + 差分」序列上
 
+分块自适应帧（mode = 4, CHUNKED）
+---------------------------------
+把序列切成若干块，逐块独立选择 RAW/DELTA/RLE/COMBO。
+magic | mode=4 | chunk_count(uvarint) | 块表 | 各块 body 顺序拼接
+块表每项：mode(1B) + elem_count(uvarint) + body_len(uvarint)
+  elem_count = 该块元素个数（>=1），body_len = 该块 body 字节数（>=1）
+解码时先校验整块表（含累计元素数与各块偏移），再逐块解码；
+块表损坏时报错信息包含块序号与字节偏移，可直接定位。
+
 大整数 / 负数无损：ZigZag 把符号映射到无符号，再用无符号 LEB128；
 Python int 为任意精度，解码时显式还原符号，不存在 << 溢出或符号位错误。
 """
@@ -34,6 +43,9 @@ RLE = 2
 COMBO = 3
 MODES = (RAW, DELTA, RLE, COMBO)
 MODE_NAMES = {RAW: "RAW", DELTA: "DELTA", RLE: "RLE", COMBO: "COMBO"}
+
+# 分块自适应帧模式（帧级模式，不是块内可选模式）
+CHUNKED = 4
 
 
 class CodecError(ValueError):
@@ -198,6 +210,59 @@ def _write_rle_body(buf: bytearray, runs: Sequence[Tuple[int, int]]) -> None:
         write_uvarint(buf, count)
 
 
+def _write_body(buf: bytearray, mode: int, seq: Sequence[int]) -> None:
+    """写某一元素模式的 body（不含 magic/模式字节），供整帧与分块帧共用。"""
+    if mode == RAW:
+        _write_raw_body(buf, seq)
+    elif mode == DELTA:
+        _write_raw_body(buf, delta_encode(seq))
+    elif mode == RLE:
+        _write_rle_body(buf, rle_encode(seq))
+    elif mode == COMBO:
+        _write_rle_body(buf, combo_encode(seq))
+    else:
+        raise CodecError("未知模式: %r" % (mode,))
+
+
+def _read_body(data: bytes, pos: int, mode: int, end: int = None,
+               ctx: str = "") -> Tuple[List[int], int]:
+    """从 pos 起解析一个 body，返回 (原序列, 新 pos)。
+
+    end 给定时期望 body 恰好占满 [pos, end)；否则占满到帧尾。
+    ctx 为错误定位上下文（如 "块#3"），拼进异常信息。
+    """
+    if end is None:
+        end = len(data)
+    if mode in (RAW, DELTA):
+        n, pos = read_uvarint(data, pos)
+        out = []
+        for _ in range(n):
+            x, pos = read_svarint(data, pos)
+            out.append(x)
+        if pos != end:
+            raise CodecError("%sbody 未恰好结束（期望结束于偏移 %d，实际 %d）"
+                             % (ctx, end, pos))
+        return (out if mode == RAW else delta_decode(out)), pos
+    if mode in (RLE, COMBO):
+        r, pos = read_uvarint(data, pos)
+        runs: List[Tuple[int, int]] = []
+        prev = None
+        for _ in range(r):
+            value, pos = read_svarint(data, pos)
+            count, pos = read_uvarint(data, pos)
+            if count <= 0:
+                raise CodecError("%s非法游程计数: %d" % (ctx, count))
+            if prev is not None and value == prev:
+                raise CodecError("%s相邻游程值相同，帧不合法" % ctx)
+            runs.append((value, count))
+            prev = value
+        if pos != end:
+            raise CodecError("%sbody 未恰好结束（期望结束于偏移 %d，实际 %d）"
+                             % (ctx, end, pos))
+        return (rle_decode(runs) if mode == RLE else combo_decode(runs)), pos
+    raise CodecError("%s未知模式: %r" % (ctx, mode))
+
+
 def serialize(mode: int, seq: Sequence[int]) -> bytes:
     """按指定模式序列化。mode 必须是 RAW/DELTA/RLE/COMBO 之一。"""
     _check_ints(seq)
@@ -205,14 +270,7 @@ def serialize(mode: int, seq: Sequence[int]) -> bytes:
         raise CodecError("未知模式: %r" % (mode,))
     buf = bytearray(MAGIC)
     buf.append(mode)
-    if mode == RAW:
-        _write_raw_body(buf, seq)
-    elif mode == DELTA:
-        _write_raw_body(buf, delta_encode(seq))
-    elif mode == RLE:
-        _write_rle_body(buf, rle_encode(seq))
-    else:
-        _write_rle_body(buf, combo_encode(seq))
+    _write_body(buf, mode, seq)
     return bytes(buf)
 
 
@@ -224,36 +282,241 @@ def deserialize(data: bytes) -> Tuple[int, List[int]]:
     if len(data) < 5 or data[:4] != MAGIC:
         raise CodecError("magic 不匹配或帧过短")
     mode = data[4]
+    if mode == CHUNKED:
+        return CHUNKED, _deserialize_chunked(data)
     if mode not in MODES:
         raise CodecError("未知模式字节: %d" % mode)
-    pos = 5
-    if mode in (RAW, DELTA):
-        n, pos = read_uvarint(data, pos)
-        out = []
-        for _ in range(n):
-            x, pos = read_svarint(data, pos)
-            out.append(x)
-        if pos != len(data):
-            raise CodecError("帧尾部有多余字节")
-        return mode, (out if mode == RAW else delta_decode(out))
-    # RLE / COMBO
-    r, pos = read_uvarint(data, pos)
-    runs: List[Tuple[int, int]] = []
-    total = 0
-    prev = None
-    for _ in range(r):
-        value, pos = read_svarint(data, pos)
-        count, pos = read_uvarint(data, pos)
-        if count <= 0:
-            raise CodecError("非法游程计数: %d" % count)
-        if prev is not None and value == prev:
-            raise CodecError("相邻游程值相同，帧不合法")
-        runs.append((value, count))
-        total += count
-        prev = value
+    seq, pos = _read_body(data, 5, mode)
     if pos != len(data):
         raise CodecError("帧尾部有多余字节")
-    return mode, (rle_decode(runs) if mode == RLE else combo_decode(runs))
+    return mode, seq
+
+
+# --------------------------------------------------------------------------
+# 分块自适应编码（CHUNKED 帧）
+# --------------------------------------------------------------------------
+
+def split_fixed(seq: Sequence[int], chunk_size: int) -> List[Tuple[int, int]]:
+    """固定大小切分，返回 [(start, end), ...] 半开区间。空序列返回 []。"""
+    if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) \
+            or chunk_size <= 0:
+        raise CodecError("chunk_size 必须是正整数: %r" % (chunk_size,))
+    n = len(seq)
+    return [(i, min(i + chunk_size, n)) for i in range(0, n, chunk_size)]
+
+
+def split_adaptive(seq: Sequence[int], block_size: int = 1024,
+                   max_chunk: int = 1 << 20) -> List[Tuple[int, int]]:
+    """自适应切分：先按 block_size 切基础块并逐块选最优模式，
+    再把「最优模式相同」的相邻基础块合并为大块（上限 max_chunk 元素）。
+
+    数据分布均匀的段会合并成少数大块（块表开销小），分布突变的
+    位置自然成为块边界（每块都能用各自最优模式）。
+    """
+    n = len(seq)
+    if n == 0:
+        return []
+    blocks = split_fixed(seq, block_size)
+    spans: List[Tuple[int, int]] = []
+    cur_start, cur_end = blocks[0]
+    cur_mode = _best_body_mode(seq[cur_start:cur_end])
+    for start, end in blocks[1:]:
+        m = _best_body_mode(seq[start:end])
+        if m == cur_mode and end - cur_start <= max_chunk:
+            cur_end = end
+        else:
+            spans.append((cur_start, cur_end))
+            cur_start, cur_end, cur_mode = start, end, m
+    spans.append((cur_start, cur_end))
+    return spans
+
+
+def _best_body_mode(seq: Sequence[int]) -> int:
+    """单块最优模式：与 analyze 相同的字节规则（不含帧头），平局 RAW 优先。"""
+    sizes = {
+        RAW: _raw_body_size(seq),
+        DELTA: _raw_body_size(delta_encode(seq)),
+        RLE: _rle_body_size(rle_encode(seq)),
+        COMBO: _rle_body_size(rle_encode(delta_encode(seq))),
+    }
+    return min(MODES, key=lambda m: (sizes[m], m))
+
+
+def serialize_chunked(seq: Sequence[int],
+                      spans: Sequence[Tuple[int, int]] = None,
+                      chunk_size: int = None,
+                      adaptive: bool = False,
+                      block_size: int = 1024) -> bytes:
+    """分块自适应编码。
+
+    切分方式三选一：
+      spans      显式 [(start, end), ...]，必须不重不漏覆盖 [0, len(seq))
+      chunk_size 固定块大小
+      adaptive=True 自适应切分（block_size 为基础块粒度）
+    都不给时按 block_size 固定切分（默认 1024）。
+    """
+    _check_ints(seq)
+    n = len(seq)
+    if spans is None:
+        if chunk_size is not None:
+            spans = split_fixed(seq, chunk_size)
+        elif adaptive:
+            spans = split_adaptive(seq, block_size)
+        else:
+            spans = split_fixed(seq, block_size)
+    else:
+        spans = [(int(s), int(e)) for s, e in spans]
+        pos = 0
+        for idx, (s, e) in enumerate(spans):
+            if s != pos or e <= s or e > n:
+                raise CodecError(
+                    "块区间非法：块#%d [%d, %d)，期望起点 %d，序列长 %d"
+                    % (idx, s, e, pos, n))
+            pos = e
+        if pos != n:
+            raise CodecError("块区间未覆盖全序列：覆盖到 %d，序列长 %d" % (pos, n))
+
+    buf = bytearray(MAGIC)
+    buf.append(CHUNKED)
+    write_uvarint(buf, len(spans))
+    bodies = []
+    table = bytearray()
+    for s, e in spans:
+        chunk = seq[s:e]
+        mode = _best_body_mode(chunk)
+        body = bytearray()
+        _write_body(body, mode, chunk)
+        table.append(mode)
+        write_uvarint(table, e - s)
+        write_uvarint(table, len(body))
+        bodies.append(body)
+    buf += table
+    for body in bodies:
+        buf += body
+    return bytes(buf)
+
+
+def parse_chunk_table(data: bytes) -> List[dict]:
+    """只解析块表（不解码 body），返回每块的定位信息，供调试/校验。"""
+    data = bytes(data)
+    if len(data) < 5 or data[:4] != MAGIC:
+        raise CodecError("magic 不匹配或帧过短")
+    if data[4] != CHUNKED:
+        raise CodecError("不是分块帧（模式字节=%d）" % data[4])
+    return _read_chunk_table(data)[0]
+
+
+def _read_chunk_table(data: bytes) -> Tuple[List[dict], int]:
+    """解析并校验块表，返回 (表项列表, body 区起始偏移)。
+
+    所有错误信息都带块序号与字节偏移，可直接定位损坏点。
+    """
+    n = len(data)
+    pos = 5
+    chunk_count, pos = read_uvarint(data, pos)
+    entries: List[dict] = []
+    body_off = None
+    for i in range(chunk_count):
+        entry_pos = pos
+        if pos >= n:
+            raise CodecError(
+                "块表损坏：块#%d 的表项缺失（块表在偏移 %d 处被截断，"
+                "帧共 %d 字节，声明 %d 块）" % (i, pos, n, chunk_count))
+        mode = data[pos]
+        pos += 1
+        if mode not in MODES:
+            raise CodecError(
+                "块表损坏：块#%d 的模式字节非法（值=%d，表项位于偏移 %d）"
+                % (i, mode, entry_pos))
+        try:
+            elem_count, pos = read_uvarint(data, pos)
+            body_len, pos = read_uvarint(data, pos)
+        except CodecError as exc:
+            raise CodecError(
+                "块表损坏：块#%d 的表项在偏移 %d 处截断（%s）"
+                % (i, entry_pos, exc))
+        if elem_count <= 0:
+            raise CodecError(
+                "块表损坏：块#%d 元素数非法（%d，表项位于偏移 %d）"
+                % (i, elem_count, entry_pos))
+        if body_len <= 0:
+            raise CodecError(
+                "块表损坏：块#%d body 长度非法（%d，表项位于偏移 %d）"
+                % (i, body_len, entry_pos))
+        entries.append({
+            "index": i, "mode": mode, "elem_count": elem_count,
+            "body_len": body_len, "table_offset": entry_pos,
+        })
+    body_off = pos
+    cursor = body_off
+    for entry in entries:
+        entry["body_offset"] = cursor
+        cursor += entry["body_len"]
+        if cursor > n:
+            raise CodecError(
+                "块表损坏：块#%d 的 body 越界（body 位于偏移 %d..%d，"
+                "帧仅 %d 字节）"
+                % (entry["index"], entry["body_offset"], cursor, n))
+    if cursor != n:
+        raise CodecError(
+            "块表损坏：块表声明的 body 总长度为 %d 字节，"
+            "但帧实际 body 区为 %d 字节（body 区起始偏移 %d）"
+            % (cursor - body_off, n - body_off, body_off))
+    return entries, body_off
+
+
+def _deserialize_chunked(data: bytes) -> List[int]:
+    entries, _ = _read_chunk_table(data)
+    out: List[int] = []
+    for entry in entries:
+        ctx = "块#%d（body 偏移 %d）：" % (entry["index"], entry["body_offset"])
+        try:
+            chunk, _ = _read_body(data, entry["body_offset"], entry["mode"],
+                                  entry["body_offset"] + entry["body_len"],
+                                  ctx)
+        except CodecError as exc:
+            raise CodecError("块#%d 解码失败：%s" % (entry["index"], exc))
+        if len(chunk) != entry["elem_count"]:
+            raise CodecError(
+                "块#%d 解码出 %d 个元素，与块表声明的 %d 不符（body 偏移 %d）"
+                % (entry["index"], len(chunk), entry["elem_count"],
+                   entry["body_offset"]))
+        out.extend(chunk)
+    return out
+
+
+def encode_chunked(seq: Sequence[int], chunk_size: int = None,
+                   adaptive: bool = False,
+                   block_size: int = 1024) -> Tuple[bytes, dict]:
+    """分块自适应编码，返回 (帧字节, 报告)。
+
+    报告含每块的模式/元素数/字节数与块表开销，便于分析分块数对
+    压缩率的影响。
+    """
+    if chunk_size is not None:
+        spans = split_fixed(seq, chunk_size)
+    elif adaptive:
+        spans = split_adaptive(seq, block_size)
+    else:
+        spans = split_fixed(seq, block_size)
+    blob = serialize_chunked(seq, spans=spans)
+    entries = parse_chunk_table(blob)
+    # body 区起点即第一块 body_offset；空序列时块表仅 chunk_count 一个字节
+    body_start = entries[0]["body_offset"] if entries else 6
+    report = {
+        "length": len(seq),
+        "chunks": len(entries),
+        "header_bytes": 5,
+        "table_bytes": body_start - 5,
+        "body_bytes": len(blob) - body_start,
+        "total_bytes": len(blob),
+        "chunk_modes": {MODE_NAMES[m]: sum(1 for e in entries if e["mode"] == m)
+                        for m in MODES},
+        "spans": [(e["index"], spans[e["index"]][0], spans[e["index"]][1])
+                  for e in entries],
+        "entries": entries,
+    }
+    return blob, report
 
 
 # --------------------------------------------------------------------------
@@ -393,7 +656,7 @@ def decoded_mode(data: bytes) -> int:
     if len(data) < 5 or data[:4] != MAGIC:
         raise CodecError("magic 不匹配或帧过短")
     mode = data[4]
-    if mode not in MODES:
+    if mode not in MODES and mode != CHUNKED:
         raise CodecError("未知模式字节: %d" % mode)
     return mode
 

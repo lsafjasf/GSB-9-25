@@ -1,0 +1,414 @@
+{
+  "python": "3.12.3",
+  "n": 1000000,
+  "seed": 20260929,
+  "rows": [
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 1,
+      "chunk_size": 1000000,
+      "table_bytes": 8,
+      "total_bytes": 998822,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.1249,
+      "encode_ms": 639.2,
+      "chunk_modes": {
+        "COMBO": 1
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 4,
+      "chunk_size": 250000,
+      "table_bytes": 29,
+      "total_bytes": 997922,
+      "vs_whole_best": 0.9991,
+      "vs_fixed64": 0.1247,
+      "encode_ms": 567.5,
+      "chunk_modes": {
+        "DELTA": 2,
+        "COMBO": 2
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 16,
+      "chunk_size": 62500,
+      "table_bytes": 113,
+      "total_bytes": 997442,
+      "vs_whole_best": 0.9986,
+      "vs_fixed64": 0.1247,
+      "encode_ms": 558.5,
+      "chunk_modes": {
+        "DELTA": 6,
+        "COMBO": 10
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 64,
+      "chunk_size": 15625,
+      "table_bytes": 321,
+      "total_bytes": 996271,
+      "vs_whole_best": 0.9975,
+      "vs_fixed64": 0.1245,
+      "encode_ms": 565.6,
+      "chunk_modes": {
+        "DELTA": 35,
+        "COMBO": 29
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 256,
+      "chunk_size": 3907,
+      "table_bytes": 1282,
+      "total_bytes": 994660,
+      "vs_whole_best": 0.9958,
+      "vs_fixed64": 0.1243,
+      "encode_ms": 543.0,
+      "chunk_modes": {
+        "DELTA": 129,
+        "COMBO": 127
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 1024,
+      "chunk_size": 977,
+      "table_bytes": 5122,
+      "total_bytes": 996478,
+      "vs_whole_best": 0.9977,
+      "vs_fixed64": 0.1246,
+      "encode_ms": 515.6,
+      "chunk_modes": {
+        "DELTA": 527,
+        "COMBO": 497
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 4082,
+      "chunk_size": 245,
+      "table_bytes": 20412,
+      "total_bytes": 1015501,
+      "vs_whole_best": 1.0167,
+      "vs_fixed64": 0.1269,
+      "encode_ms": 525.0,
+      "chunk_modes": {
+        "DELTA": 2225,
+        "COMBO": 1857
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 16130,
+      "chunk_size": 62,
+      "table_bytes": 48392,
+      "total_bytes": 1083343,
+      "vs_whole_best": 1.0846,
+      "vs_fixed64": 0.1354,
+      "encode_ms": 556.9,
+      "chunk_modes": {
+        "DELTA": 10090,
+        "COMBO": 6040
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 62500,
+      "chunk_size": 16,
+      "table_bytes": 187503,
+      "total_bytes": 1440500,
+      "vs_whole_best": 1.4422,
+      "vs_fixed64": 0.1801,
+      "encode_ms": 683.6,
+      "chunk_modes": {
+        "DELTA": 47211,
+        "COMBO": 15289
+      }
+    },
+    {
+      "distribution": "timestamps 递增时间戳",
+      "chunks": 507,
+      "chunk_size": "自适应",
+      "table_bytes": 2537,
+      "total_bytes": 990764,
+      "vs_whole_best": 0.9919,
+      "vs_fixed64": 0.1238,
+      "encode_ms": 993.5,
+      "chunk_modes": {
+        "DELTA": 253,
+        "COMBO": 254
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 1,
+      "chunk_size": 1000000,
+      "table_bytes": 8,
+      "total_bytes": 1000018,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.125,
+      "encode_ms": 622.1,
+      "chunk_modes": {
+        "DELTA": 1
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 4,
+      "chunk_size": 250000,
+      "table_bytes": 29,
+      "total_bytes": 1000054,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.125,
+      "encode_ms": 600.0,
+      "chunk_modes": {
+        "DELTA": 4
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 16,
+      "chunk_size": 62500,
+      "table_bytes": 113,
+      "total_bytes": 1000198,
+      "vs_whole_best": 1.0002,
+      "vs_fixed64": 0.125,
+      "encode_ms": 583.8,
+      "chunk_modes": {
+        "DELTA": 16
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 64,
+      "chunk_size": 15625,
+      "table_bytes": 321,
+      "total_bytes": 1000582,
+      "vs_whole_best": 1.0006,
+      "vs_fixed64": 0.1251,
+      "encode_ms": 561.4,
+      "chunk_modes": {
+        "DELTA": 64
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 256,
+      "chunk_size": 3907,
+      "table_bytes": 1282,
+      "total_bytes": 1002311,
+      "vs_whole_best": 1.0023,
+      "vs_fixed64": 0.1253,
+      "encode_ms": 556.1,
+      "chunk_modes": {
+        "DELTA": 256
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 1024,
+      "chunk_size": 977,
+      "table_bytes": 5122,
+      "total_bytes": 1009223,
+      "vs_whole_best": 1.0092,
+      "vs_fixed64": 0.1262,
+      "encode_ms": 537.4,
+      "chunk_modes": {
+        "DELTA": 1024
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 4082,
+      "chunk_size": 245,
+      "table_bytes": 20412,
+      "total_bytes": 1036745,
+      "vs_whole_best": 1.0367,
+      "vs_fixed64": 0.1296,
+      "encode_ms": 544.8,
+      "chunk_modes": {
+        "DELTA": 4082
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 16130,
+      "chunk_size": 62,
+      "table_bytes": 48392,
+      "total_bytes": 1096787,
+      "vs_whole_best": 1.0968,
+      "vs_fixed64": 0.1371,
+      "encode_ms": 587.0,
+      "chunk_modes": {
+        "DELTA": 16130
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 62500,
+      "chunk_size": 16,
+      "table_bytes": 187503,
+      "total_bytes": 1375006,
+      "vs_whole_best": 1.375,
+      "vs_fixed64": 0.1719,
+      "encode_ms": 713.4,
+      "chunk_modes": {
+        "DELTA": 62499,
+        "COMBO": 1
+      }
+    },
+    {
+      "distribution": "smooth_walk 小波动游走",
+      "chunks": 1,
+      "chunk_size": "自适应",
+      "table_bytes": 8,
+      "total_bytes": 1000018,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.125,
+      "encode_ms": 1065.1,
+      "chunk_modes": {
+        "DELTA": 1
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 1,
+      "chunk_size": 1000000,
+      "table_bytes": 9,
+      "total_bytes": 4865240,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.6082,
+      "encode_ms": 928.7,
+      "chunk_modes": {
+        "RAW": 1
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 4,
+      "chunk_size": 250000,
+      "table_bytes": 29,
+      "total_bytes": 4865269,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.6082,
+      "encode_ms": 852.6,
+      "chunk_modes": {
+        "RAW": 4
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 16,
+      "chunk_size": 62500,
+      "table_bytes": 113,
+      "total_bytes": 4865389,
+      "vs_whole_best": 1.0,
+      "vs_fixed64": 0.6082,
+      "encode_ms": 820.0,
+      "chunk_modes": {
+        "RAW": 16
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 64,
+      "chunk_size": 15625,
+      "table_bytes": 385,
+      "total_bytes": 4865515,
+      "vs_whole_best": 1.0001,
+      "vs_fixed64": 0.6082,
+      "encode_ms": 865.8,
+      "chunk_modes": {
+        "RAW": 55,
+        "DELTA": 9
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 256,
+      "chunk_size": 3907,
+      "table_bytes": 1538,
+      "total_bytes": 4865740,
+      "vs_whole_best": 1.0001,
+      "vs_fixed64": 0.6082,
+      "encode_ms": 827.4,
+      "chunk_modes": {
+        "RAW": 176,
+        "DELTA": 80
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 1024,
+      "chunk_size": 977,
+      "table_bytes": 5122,
+      "total_bytes": 4868018,
+      "vs_whole_best": 1.0006,
+      "vs_fixed64": 0.6085,
+      "encode_ms": 805.0,
+      "chunk_modes": {
+        "RAW": 632,
+        "DELTA": 392
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 4082,
+      "chunk_size": 245,
+      "table_bytes": 20412,
+      "total_bytes": 4883490,
+      "vs_whole_best": 1.0038,
+      "vs_fixed64": 0.6104,
+      "encode_ms": 825.3,
+      "chunk_modes": {
+        "RAW": 2384,
+        "DELTA": 1698
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 16130,
+      "chunk_size": 62,
+      "table_bytes": 64521,
+      "total_bytes": 4923764,
+      "vs_whole_best": 1.012,
+      "vs_fixed64": 0.6155,
+      "encode_ms": 872.3,
+      "chunk_modes": {
+        "RAW": 9364,
+        "DELTA": 6766
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 62500,
+      "chunk_size": 16,
+      "table_bytes": 187503,
+      "total_bytes": 5071822,
+      "vs_whole_best": 1.0425,
+      "vs_fixed64": 0.634,
+      "encode_ms": 1002.7,
+      "chunk_modes": {
+        "RAW": 39319,
+        "DELTA": 23181
+      }
+    },
+    {
+      "distribution": "shock 剧烈震荡(±1e9)",
+      "chunks": 462,
+      "chunk_size": "自适应",
+      "table_bytes": 2376,
+      "total_bytes": 4864138,
+      "vs_whole_best": 0.9998,
+      "vs_fixed64": 0.608,
+      "encode_ms": 1359.8,
+      "chunk_modes": {
+        "RAW": 231,
+        "DELTA": 231
+      }
+    }
+  ]
+}
