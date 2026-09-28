@@ -61,7 +61,7 @@ def main():
     streams, entries = rx.state_size()
     print(f"\n最终状态: {streams} 个流, {entries:,} 条窗口记录 "
           f"(上界 {N_STREAMS * WINDOW:,})，与消息总量 {total:,} 无关")
-    print("自洽校验通过: received == processed + duplicate + expired + conflict")
+    print("自洽校验通过: received == processed + duplicate + expired + conflict + undetermined")
 
 
 if __name__ == "__main__":

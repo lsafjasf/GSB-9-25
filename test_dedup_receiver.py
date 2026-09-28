@@ -66,6 +66,21 @@ class TestWindowDedup(unittest.TestCase):
         self.assertEqual(self.rx.receive(msg("s", 5)), "expired")
         self.assertEqual(self.rx.receive(msg("s", 1)), "expired")
 
+    def test_incremental_evict_with_out_of_order(self):
+        # 乱序插入后持续推进窗口，过期记录应被精确淘汰（增量淘汰正确性）
+        self.rx.receive(msg("s", 10))
+        self.rx.receive(msg("s", 5))              # 乱序落入窗口内空隙
+        for seq in range(11, 20):                 # 推进到 max_seq = 19（跳过 14 留空隙）
+            if seq != 14:
+                self.rx.receive(msg("s", seq))
+        # 窗口覆盖落后距离 < 8 的序号，即 [12, 19]
+        self.assertEqual(self.rx.receive(msg("s", 5)), "expired")
+        self.assertEqual(self.rx.receive(msg("s", 10)), "expired")
+        self.assertEqual(self.rx.receive(msg("s", 12)), "duplicate")  # 未被误淘汰
+        self.assertEqual(self.rx.receive(msg("s", 14)), "processed")  # 窗口内空隙
+        _, entries = self.rx.state_size()
+        self.assertLessEqual(entries, 8)          # 窗口记录数不超过 window_size
+
     def test_conflict_same_id_seq_different_payload(self):
         self.rx.receive(msg("s", 1, "alpha"))
         self.assertEqual(self.rx.receive(msg("s", 1, "alpha")), "duplicate")
@@ -94,26 +109,49 @@ class TestWraparound(unittest.TestCase):
         self.assertEqual(rx.receive(msg("w", 253)), "expired")
 
 
-class TestAbnormalIdentity(unittest.TestCase):
+class TestUndeterminedIdentity(unittest.TestCase):
     def setUp(self):
         self.handled = []
+        self.undetermined = []
         self.rx = DedupReceiver(window_size=8, max_streams=4,
-                                handler=self.handled.append)
+                                handler=self.handled.append,
+                                undetermined_handler=self.undetermined.append)
 
     def test_missing_or_invalid_id(self):
         for bad in (None, "", 123, b"bytes"):
-            self.assertEqual(self.rx.receive(msg(bad, 1)), "processed_bad_id")
-        self.assertEqual(self.rx.stats["bad_id"], 4)
-        self.assertEqual(len(self.handled), 4)  # 无法去重，必须处理
+            self.assertEqual(self.rx.receive(msg(bad, 1)), "undetermined")
+        self.assertEqual(self.rx.stats["undetermined"], 4)
+        # 无法判定的消息不进入正常处理流程，交给兜底回调
+        self.assertEqual(len(self.handled), 0)
+        self.assertEqual(len(self.undetermined), 4)
 
     def test_missing_or_invalid_seq(self):
-        self.assertEqual(self.rx.receive({"id": "s"}), "processed_bad_id")
-        self.assertEqual(self.rx.receive(msg("s", -1)), "processed_bad_id")
-        self.assertEqual(self.rx.receive(msg("s", "3")), "processed_bad_id")
-        self.assertEqual(self.rx.receive(msg("s", True)), "processed_bad_id")
-        self.assertEqual(self.rx.stats["bad_id"], 4)
+        self.assertEqual(self.rx.receive({"id": "s"}), "undetermined")
+        self.assertEqual(self.rx.receive(msg("s", -1)), "undetermined")
+        self.assertEqual(self.rx.receive(msg("s", "3")), "undetermined")
+        self.assertEqual(self.rx.receive(msg("s", True)), "undetermined")
+        self.assertEqual(self.rx.stats["undetermined"], 4)
+        self.assertEqual(len(self.handled), 0)
         # 异常序号不污染正常流状态
         self.assertEqual(self.rx.receive(msg("s", 3)), "processed_new_stream")
+
+    def test_redelivery_not_double_processed(self):
+        # 复现旧版缺陷：缺标识的消息直接交给处理器，重投一次就被处理两次。
+        # 现在无法判定的消息与正常处理分开：重投只重复计数，不重复处理。
+        bad = {"id": None, "seq": 5, "payload": "no-id"}
+        self.assertEqual(self.rx.receive(bad), "undetermined")
+        self.assertEqual(self.rx.receive(dict(bad)), "undetermined")  # 重投
+        self.assertEqual(len(self.handled), 0)       # 正常处理器一次都没看到
+        self.assertEqual(len(self.undetermined), 2)  # 兜底回调每次都能收到
+        self.assertEqual(self.rx.stats["undetermined"], 2)
+        self.assertEqual(self.rx.stats["processed"], 0)
+
+    def test_undetermined_without_fallback_handler(self):
+        rx = DedupReceiver(window_size=8, max_streams=4,
+                           handler=self.handled.append)
+        self.assertEqual(rx.receive(msg(None, 1)), "undetermined")
+        self.assertEqual(rx.stats["undetermined"], 1)
+        self.assertEqual(len(self.handled), 0)
 
 
 class TestBoundedMemory(unittest.TestCase):
@@ -153,12 +191,13 @@ class TestStatsConsistency(unittest.TestCase):
         self.assertEqual(s["received"], len(scenario))
         self.assertEqual(s["received"],
                          s["processed"] + s["duplicate"]
-                         + s["expired"] + s["conflict"])
+                         + s["expired"] + s["conflict"]
+                         + s["undetermined"])
         self.assertTrue(rx.check_consistency())
         self.assertEqual(s["duplicate"], 2)
         self.assertEqual(s["conflict"], 1)
         self.assertEqual(s["expired"], 2)
-        self.assertEqual(s["bad_id"], 2)
+        self.assertEqual(s["undetermined"], 2)
 
 
 if __name__ == "__main__":
