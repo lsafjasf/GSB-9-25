@@ -218,7 +218,7 @@ class Router:
             payload=payload,
         )
         shadowers: List[Rule] = []
-        self._find_shadowers(self._root, segments, 0, rule, shadowers)
+        self._find_shadowers(self._root, segments, 0, rule, False, shadowers)
         if shadowers:
             msg = "%s is fully shadowed by %s" % (
                 rule.describe(),
@@ -246,37 +246,76 @@ class Router:
         return rule
 
     def _find_shadowers(
-        self, node: _Node, segs: Tuple[Segment, ...], i: int, rule: Rule, out: List[Rule]
+        self,
+        node: _Node,
+        segs: Tuple[Segment, ...],
+        i: int,
+        rule: Rule,
+        won: bool,
+        out: List[Rule],
     ) -> None:
         """Find already-registered rules that fully shadow ``rule``.
 
         An earlier rule A fully shadows B iff A's match set is a superset of
-        B's and A's priority is >= B's for every path B can match.  On the
-        kind ordering static<param<wild<tailwild this reduces to a trie walk:
+        B's and A's priority is >= B's for every path B can match.  Priority
+        is the lexicographic order on segment-kind tuples (the same order
+        ``_collect`` yields candidates in), so the walk carries a ``won``
+        flag: once A's kind was strictly smaller at some earlier position,
+        A wins regardless of later segments and only coverage of B's
+        remaining paths is required; while still tied, only branches with
+        kind <= B's current segment kind are useful.
         """
         if i == len(segs):
-            for r in node.rules:  # identical kind tuple, earlier registration wins
+            # B terminates here.  Rules at this node have B's exact kind
+            # tuple (tied) or already won; either way earlier registration
+            # wins.  A '**' tail also matches B's zero remaining segments,
+            # but only shadows if A already strictly won (otherwise B's
+            # tuple is a proper prefix of A's and B would win).
+            for r in node.rules:
                 if _constraint_covers(r, rule):
                     out.append(r)
+            if won:
+                for r in node.tail:
+                    if _constraint_covers(r, rule):
+                        out.append(r)
             return
         seg = segs[i]
+        if won:
+            # A already wins on kind order; only coverage matters now.
+            # A '**' tail here covers every remaining path of B.
+            for r in node.tail:
+                if _constraint_covers(r, rule):
+                    out.append(r)
+            if seg.kind == TAILWILD:
+                return  # only a '**' tail covers B's '**'
+            children: List[Optional[_Node]] = []
+            if seg.kind == STATIC:
+                children.append(node.static.get(seg.literal))
+            # Param and wild children each match any single segment value.
+            children.extend((node.param, node.wild))
+            for child in children:
+                if child is not None:
+                    self._find_shadowers(child, segs, i + 1, rule, True, out)
+            return
         if seg.kind == STATIC:
-            # Only the identical static segment covers with >= priority.
+            # Only the identical static segment covers with a tied kind.
             child = node.static.get(seg.literal)
             if child is not None:
-                self._find_shadowers(child, segs, i + 1, rule, out)
+                self._find_shadowers(child, segs, i + 1, rule, False, out)
         elif seg.kind == PARAM:
-            # Only an existing param covers a param with >= priority.
+            # Only an existing param covers a param's value set (static
+            # children cover a single value; wild has a weaker kind).
             if node.param is not None:
-                self._find_shadowers(node.param, segs, i + 1, rule, out)
+                self._find_shadowers(node.param, segs, i + 1, rule, False, out)
         elif seg.kind == WILD:
-            # Existing param or wild covers a wild with >= priority.
+            # A param covers a wild's value set with a strictly smaller
+            # kind: A wins here regardless of what follows.
             if node.param is not None:
-                self._find_shadowers(node.param, segs, i + 1, rule, out)
+                self._find_shadowers(node.param, segs, i + 1, rule, True, out)
             if node.wild is not None:
-                self._find_shadowers(node.wild, segs, i + 1, rule, out)
+                self._find_shadowers(node.wild, segs, i + 1, rule, False, out)
         else:  # TAILWILD (last segment)
-            # Only an identical '**' tail at the same node has >= priority.
+            # Only an identical '**' tail at the same node covers it.
             for r in node.tail:
                 if _constraint_covers(r, rule):
                     out.append(r)

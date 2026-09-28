@@ -197,6 +197,26 @@ class TestConflictDetection(unittest.TestCase):
         with self.assertRaises(PatternError):
             load_rules(Router(), "GET /only-two\n")
 
+    def test_lexicographic_shadowing_param_tailwild_over_wild_static(self):
+        # A=(param, tailwild) tuple (1,3) beats B=(wild, static) tuple (2,0)
+        # lexicographically at the first segment, so every path B can match
+        # is won by A even though B's later static segment is stronger.
+        text = "\n".join([
+            "GET - /{x}/**",   # line 1
+            "GET - /*/foo",    # line 2: fully shadowed by line 1
+        ])
+        with self.assertRaises(ConflictError) as ctx:
+            load_rules(Router(), text)
+        msg = str(ctx.exception)
+        self.assertIn("line 2", msg)          # the shadowed rule is reported
+        self.assertIn("/*/foo", msg)
+        self.assertIn("fully shadowed by", msg)
+        self.assertIn("line 1", msg)          # ... along with who shadows it
+        self.assertIn("/{x}/**", msg)
+        # and A indeed wins every path B could match
+        r = make([(None, None, "/{x}/**"), (None, None, "/*/foo")])
+        self.assertEqual(r.match("/anything/foo").rule.pattern, "/{x}/**")
+
 
 class TestScale(unittest.TestCase):
     def test_thousand_rules_smoke(self):
