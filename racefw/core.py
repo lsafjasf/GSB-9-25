@@ -8,6 +8,7 @@
 - 每一步都记录 Event（谁、何时、对哪个资源、在哪个源码位置），
   失败时可直接按事件序列还原交错。
 """
+import dis
 import os
 import random
 import sys
@@ -31,6 +32,28 @@ class DeadlockError(Exception):
             for t, res in scheduler.blocked.items()
         )
         super().__init__(f"deadlock detected: {parts}")
+
+
+def _gen_location(gen):
+    """取线程生成器「当前停下点」对应的场景源码位置 file:line。
+
+    生成器在 ``yield``/``yield from`` 处挂起时，``gi_frame`` 停在外层
+    （场景）帧上，``f_lineno`` 就是场景侧让出点的真实行号；尚未启动时
+    帧停在 ``def`` 行，则用字节码行号表取函数体首条语句的行号。
+    """
+    frame = gen.gi_frame
+    if frame is None:
+        return None
+    if frame.f_lasti == 0:
+        first = frame.f_code.co_firstlineno
+        for _, lineno in dis.findlinestarts(frame.f_code):
+            if lineno != first:
+                first = lineno
+                break
+        lineno = first
+    else:
+        lineno = frame.f_lineno
+    return f"{os.path.basename(frame.f_code.co_filename)}:{lineno}"
 
 
 class Event:
@@ -104,10 +127,24 @@ class Scheduler:
 
     def preempt(self, note=""):
         """显式切换点：记录当前源码位置并让出控制权。"""
-        frame = sys._getframe(1)
-        loc = f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}"
-        self.log("preempt", detail=note, location=loc)
+        self.log("preempt", detail=note, location=self._user_location(2))
         yield
+
+    @staticmethod
+    def _user_location(depth=1):
+        """沿调用栈找到最外层非框架（场景侧）帧，返回 file:line。
+
+        场景可能经原语（Lock/Semaphore/Condition）间接产生切换点，
+        因此跳过 racefw 包内帧，定位到场景文件的真实行。
+        """
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        frame = sys._getframe(depth)
+        while frame and os.path.dirname(os.path.abspath(
+                frame.f_code.co_filename)) == pkg_dir:
+            frame = frame.f_back
+        if frame is None:  # 退化：无场景帧时用直接调用方
+            frame = sys._getframe(depth)
+        return f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}"
 
     def wake(self, tid, note=""):
         """唤醒被阻塞线程（由原语内部调用）。"""
@@ -124,17 +161,21 @@ class Scheduler:
             self.current = tid
             self.decisions.append(tid)
             th = self.threads[tid]
-            self.log("switch", detail=f"=> run {th['name']}", tid=tid, location="scheduler")
+            # 线程将从其生成器挂起点恢复，该行就是切换落向的真实场景位置
+            loc = _gen_location(th["gen"])
+            self.log("switch", detail=f"=> run {th['name']}", tid=tid, location=loc)
             try:
                 token = next(th["gen"])
             except StopIteration as stop:
-                self.log("finish", detail=f"return {stop.value!r}", tid=tid, location="scheduler")
+                self.log("finish", detail=f"return {stop.value!r}", tid=tid, location=loc)
                 th["done"] = True
                 self.current = None
                 continue
             if isinstance(token, _Block):
                 self.blocked[tid] = token.resource
-                self.log("block", resource=token.resource, tid=tid, location="scheduler")
+                # 阻塞发生在场景侧发起阻塞调用的 yield from 行
+                self.log("block", resource=token.resource, tid=tid,
+                         location=_gen_location(th["gen"]))
             else:
                 self.runnable.append(tid)
             self.current = None
@@ -154,7 +195,8 @@ class Scheduler:
                     low = min(self._priorities.values())
                     self._priorities[last] = low - 1.0
                     self.log("pct", detail=f"priority change: demote {last}",
-                             tid=last, location="scheduler")
+                             tid=last,
+                             location=_gen_location(self.threads[last]["gen"]))
             tid = max(self.runnable, key=lambda t: self._priorities[t])
         elif self.strategy == "rr":
             tid = self.runnable[0]

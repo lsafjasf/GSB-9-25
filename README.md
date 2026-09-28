@@ -22,7 +22,7 @@ tests/
 ## 运行
 
 ```bash
-python3 tests/selftest.py        # 全部自测（11 项检查）
+python3 tests/selftest.py        # 全部自测（14 项检查）
 python3 examples/lost_update.py  # 单独复现丢失更新 + 真实线程压测对照
 python3 examples/deadlock.py     # 单独复现死锁
 python3 examples/double_init.py  # 单独复现重复初始化
@@ -61,7 +61,10 @@ print(format_trace(s))                           # 完整事件序列
 
 每个事件包含：序号、逻辑时钟、线程、类型（switch / preempt / lock.try /
 lock.acquired / lock.release / block / wake / cond.* / sem.* / pct / finish）、
-资源名、源码位置（file:line）。例如死锁复现输出可直读：
+资源名、源码位置（file:line）。其中 switch / finish / block / pct（PCT 降级）
+四类事件的位置直接取自线程生成器的挂起帧（`gi_frame.f_lineno`），即切换落向、
+线程结束、阻塞发起、优先级降级发生时场景侧的真实行；未启动线程则定位到
+函数体首条语句，无需再靠上一条 preempt 事件反推。例如死锁复现输出可直读：
 `t2 获 B → t1 获 A → t1 请求 B 阻塞 → t2 请求 A 阻塞 → DeadlockError`。
 
 ## 调度搜索与覆盖统计

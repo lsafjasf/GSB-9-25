@@ -3,6 +3,7 @@
 运行：python3 tests/selftest.py   （或 python3 -m tests.selftest）
 """
 import os
+import re
 import sys
 import threading
 
@@ -10,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from racefw import (Condition, Lock, Scheduler, Semaphore,  # noqa: E402
                     explore, format_trace)
+from racefw import DeadlockError  # noqa: E402
 from examples import deadlock as ex_deadlock  # noqa: E402
 from examples import double_init as ex_double_init  # noqa: E402
 from examples import lost_update as ex_lost  # noqa: E402
@@ -151,7 +153,69 @@ def test_primitives():
 
 
 # --------------------------------------------------------------------- #
-# 5. 真实并发对照：真实线程观察到的合法结果 ⊆ 框架结果集合
+# 5. 事件位置：切换点必须绑定场景文件的真实源码行
+# --------------------------------------------------------------------- #
+def test_event_locations():
+    """断言 switch/finish/block/pct(降级) 的位置指向场景文件的具体行。"""
+    this_file = os.path.basename(os.path.abspath(__file__))
+    with open(os.path.abspath(__file__), encoding="utf-8") as f:
+        scenario_lines = f.readlines()
+
+    def blocking_scenario(sched):
+        lock = Lock(sched, "L")
+
+        def slow():
+            yield from lock.acquire()
+            yield from sched.preempt("holding the lock")
+            yield from lock.release()
+
+        def quick():
+            yield from lock.acquire()
+            yield from lock.release()
+
+        sched.spawn(slow, name="slow")
+        sched.spawn(quick, name="quick")
+
+    loc_re = re.compile(r"^(?P<file>[^:]+):(?P<line>\d+)$")
+    kinds = ("switch", "finish", "block", "pct")
+    seen = set()
+    bad_locations = []
+    block_lines_ok = True
+
+    for seed in range(1, 81):
+        s = Scheduler(seed=seed, strategy="pct",
+                      pct_change_points=4, expected_steps=10)
+        blocking_scenario(s)
+        try:
+            s.run()
+        except DeadlockError:
+            pass
+        for ev in s.events:
+            if ev.kind not in kinds:
+                continue
+            seen.add(ev.kind)
+            m = loc_re.match(ev.location or "")
+            if not m:
+                bad_locations.append((ev.kind, ev.location))
+                continue
+            file, line = m.group("file"), int(m.group("line"))
+            if file != this_file or not (1 <= line <= len(scenario_lines)):
+                bad_locations.append((ev.kind, ev.location))
+            if ev.kind == "block":
+                # 阻塞点必须精确落在场景里发起阻塞调用的那一行
+                block_lines_ok = block_lines_ok and (
+                    "yield from lock.acquire()" in scenario_lines[line - 1])
+
+    check("event-location: switch/finish/block/pct all observed in 80 seeds",
+          seen == set(kinds), f"seen={sorted(seen)}")
+    check("event-location: every event points at a concrete scenario line",
+          not bad_locations, f"bad={bad_locations[:5]}")
+    check("event-location: block points at the blocking acquire() line",
+          block_lines_ok)
+
+
+# --------------------------------------------------------------------- #
+# 6. 真实并发对照：真实线程观察到的合法结果 ⊆ 框架结果集合
 # --------------------------------------------------------------------- #
 def test_real_vs_framework():
     res = explore(ex_lost.scenario, runs=200, strategy="pct",
@@ -191,6 +255,7 @@ if __name__ == "__main__":
     res_lost = test_bug_reproduction()
     test_coverage(res_lost)
     test_primitives()
+    test_event_locations()
     test_real_vs_framework()
     failed = [n for n, ok in results if not ok]
     print(f"\n==== {len(results) - len(failed)}/{len(results)} checks passed ====")
