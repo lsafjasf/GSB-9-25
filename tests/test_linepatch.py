@@ -202,6 +202,23 @@ class TestApply(unittest.TestCase):
         out = apply_file_patch(patch.files[0], "keep\na\nb\n")
         self.assertEqual(out, "keep\n")
 
+    def test_pure_insertion_after_no_trailing_newline(self):
+        # A pure-addition hunk (nothing to match, inserted at the expected
+        # position) can be appended after a final line missing its newline.
+        # The terminator must be supplied so the lines do not fuse, using
+        # the target author's own line-ending convention.
+        patch = parse_patch(
+            "--- a/f\n+++ b/f\n@@ -2,0 +3 @@\n+beta\n")
+        lf_out = apply_file_patch(patch.files[0], "alpha\nomega")
+        self.assertEqual(lf_out.split("\n"), ["alpha", "omega", "beta", ""])
+        self.assertEqual(lf_out.splitlines(), ["alpha", "omega", "beta"])
+        self.assertEqual(len(lf_out.splitlines()), 3)
+        self.assertEqual(lf_out, "alpha\nomega\nbeta\n")
+        crlf_out = apply_file_patch(patch.files[0], "alpha\r\nomega")
+        self.assertEqual(crlf_out.splitlines(), ["alpha", "omega", "beta"])
+        self.assertEqual(len(crlf_out.splitlines()), 3)
+        self.assertEqual(crlf_out, "alpha\r\nomega\r\nbeta\r\n")
+
 
 class TestFilesystem(unittest.TestCase):
     def test_missing_target(self):

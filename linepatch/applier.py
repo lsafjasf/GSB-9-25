@@ -156,6 +156,12 @@ def apply_file_patch(fp: FilePatch, content: str,
                 searched_offset=config.max_offset,
             )
         new = [_Line(l.text, l.has_newline) for l in hunk.new_lines]
+        # A pure-insertion hunk can land directly after the target's final
+        # line, which may be missing its terminator.  That preceding line
+        # is no longer terminal, so supply the newline; _join renders it
+        # with ``eol`` (the target file's own dominant line-ending style).
+        if new and pos > 0 and not buf[pos - 1].has_newline:
+            buf[pos - 1].has_newline = True
         buf[pos:pos + len(old)] = new
         shift += (len(new) - len(old)) + (pos - expected)
     return _join(buf, eol)
