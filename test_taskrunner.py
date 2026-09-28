@@ -236,6 +236,19 @@ class TestResourceCleanup(unittest.TestCase):
         self.assertTrue(result.join(5))
         self.assert_all_released(runner)
 
+    def test_join_returns_when_cancelled_before_start(self):
+        """开始前取消：状态已是终止态，但提前返回分支必须同样置位清理信号，
+        否则等待方拿到结果后调用 join() 会永久挂起。"""
+        gate = threading.Event()
+        runner = TaskRunner(start_gate=gate)
+        result = runner.submit(lambda ctx: 1)
+        self.assertTrue(result.cancel())  # PENDING -> CANCELLED，worker 尚未开跑
+        gate.set()
+        self.assertTrue(result.wait(5))
+        self.assertIs(result.state(), TaskState.CANCELLED)
+        # 修复前这里永远超时：worker 提前返回时没有置位 _cleanup_done
+        self.assertTrue(result.join(5))
+
 
 class TestCallbackAdapter(unittest.TestCase):
     def collect(self):

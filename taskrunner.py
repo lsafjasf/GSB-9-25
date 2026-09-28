@@ -160,7 +160,10 @@ class TaskRunner:
             if self._start_gate is not None:
                 self._start_gate.wait()
             if not result._mark_running():
-                return  # 开始前已取消：不获取任何资源
+                # 开始前已取消：不获取任何资源，但同样要留下清理终态，
+                # 否则 join() 的等待方会永久挂起。
+                result._cleanup_done.set()
+                return
             handle = self._acquire()
             try:
                 value = fn(TaskContext(result))
