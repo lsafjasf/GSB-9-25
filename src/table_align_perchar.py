@@ -1,13 +1,16 @@
-"""文本表格对齐工具（修复版）。
+"""修复前快照：按字符逐个累加宽度（仅用于对照，请勿再修改）。
 
-宽度规则（唯一定义在 display_width / _cluster_width，全流程复用）：
+已知问题：家庭表情（ZWJ 序列）被算成 6 列、带肤色/变体选择符的表情被算成
+4 列、区域指示符对被拆成两个字符各算 1 列，导致含这些字符的行整体错位。
+修复版见 table_align.py（按字素簇计宽）。
+
+原实现说明：
+
+宽度规则（唯一定义在 display_width / _char_width，全流程复用）：
 - 制表符：一律按 8 列位展开为空格（expand_tabs），对齐/截断/折行一致；
-- 宽度按字素簇（grapheme cluster）计算，而不是逐字符累加：
-  - 组合记号 / 变体选择符 / 肤色修饰符附着于 base，不额外占宽；
-  - 含 ZWJ 的 emoji 序列（如 👨‍👩‍👧）整体计 2 列；
-  - 区域指示符对（旗帜，如 🇨🇳）整体计 2 列；
-  - 带变体选择符 U+FE0F 的 emoji（如 ✈️）整体计 2 列；
-  - 其余集群取各字符宽度的最大值（宽字符 2、普通字符 1、零宽 0）。
+- 零宽字符（Mn/Me/Cf、组合记号、变体选择符、肤色修饰符等）：宽度 0；
+- 东亚宽字符（east_asian_width 为 W/F，含绝大多数表情符号）：宽度 2；
+- 其余可打印字符：宽度 1。
 
 截断与折行按“集群”（base + 组合记号 / ZWJ 序列 / 旗帜对）推进，
 保证不可拆散序列永远不会被切成半个。
@@ -80,36 +83,24 @@ def _char_width(ch):
     return 1
 
 
-def _cluster_width(cluster):
-    """一个集群的显示宽度：emoji 序列整体计宽，组合记号不额外占宽。"""
-    cps = [ord(ch) for ch in cluster]
-    if _ZWJ in cps:
-        return 2  # ZWJ 连接的 emoji 序列整体作为一个图形，占 2 列
-    if len(cluster) == 2 and all(_is_regional(ch) for ch in cluster):
-        return 2  # 区域指示符对（旗帜）整体占 2 列
-    if any(0xFE00 <= cp <= 0xFE0F for cp in cps):
-        return 2  # 带变体选择符的 emoji 呈现（如 ✈️、1️⃣）占 2 列
-    return max((_char_width(ch) for ch in cluster), default=0)
-
-
 def expand_tabs(text, tab_stop=TAB_STOP):
     """把制表符按列位展开为空格（基于显示列，而非字符数）。"""
     out = []
     col = 0
-    for cluster in clusters(text):
-        if cluster == "\t":
+    for ch in text:
+        if ch == "\t":
             n = tab_stop - (col % tab_stop)
             out.append(" " * n)
             col += n
         else:
-            out.append(cluster)
-            col += _cluster_width(cluster)
+            out.append(ch)
+            col += _char_width(ch)
     return "".join(out)
 
 
 def display_width(text):
-    """唯一的显示宽度来源：先展开制表符，再按字素簇宽度求和。"""
-    return sum(_cluster_width(cluster) for cluster in clusters(expand_tabs(text)))
+    """唯一的显示宽度来源：先展开制表符，再按集群内字符宽度求和。"""
+    return sum(_char_width(ch) for ch in expand_tabs(text))
 
 
 def truncate(text, max_width):

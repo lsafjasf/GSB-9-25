@@ -19,6 +19,11 @@ COMBINING_E = "é"   # 'e' + U+0301，显示宽度 1
 FAMILY = "👨‍👩‍👧"        # ZWJ 序列，不可拆
 ZWSP_TEXT = "ab​cd"  # 含零宽空格 U+200B，显示宽度 4
 EMOJI = "🙂"               # 宽度 2
+RAINBOW_FLAG = "🏳️‍🌈"  # 含变体选择符的 ZWJ 序列，整体 2 列
+AIRPLANE = "✈️"          # 变体选择符 emoji，整体 2 列
+FLAG_CN = "🇨🇳"              # 区域指示符对，整体 2 列
+THUMBS_UP = "👍🏽"         # 肤色修饰符，整体 2 列
+KEYCAP = "1️⃣"            # keycap 序列，整体 2 列
 
 # 覆盖五类问题的数据集：每行两列，第二列内容互不相同以便定位
 DATASET = [
@@ -93,6 +98,40 @@ class FixedAlignTest(unittest.TestCase):
         self.assertEqual(fixed.display_width(ZWSP_TEXT), 4)
         self.assertEqual(fixed.display_width("a\tb"), 9)   # a + 7 空格 + b
         self.assertEqual(fixed.display_width("ab\tb"), 9)  # ab + 6 空格 + b
+
+    def test_grapheme_cluster_widths(self):
+        """逐条断言：宽度按字素簇计算，组合序列不逐字符累加。"""
+        cases = [
+            ("a", 1),                    # 普通字符
+            ("中", 2),                   # 东亚宽字符
+            (COMBINING_E, 1),            # 组合记号不额外占宽
+            (EMOJI, 2),                  # 单个 emoji
+            (FAMILY, 2),                 # ZWJ 序列整体 2 列（修复前为 6）
+            (RAINBOW_FLAG, 2),           # 含 VS16 的 ZWJ 序列整体 2 列
+            (AIRPLANE, 2),               # 变体选择符 emoji 整体 2 列
+            (FLAG_CN, 2),                # 区域指示符对整体 2 列
+            (THUMBS_UP, 2),              # 肤色修饰符不额外占宽（修复前为 4）
+            (KEYCAP, 2),                 # keycap 序列整体 2 列
+            (ZWSP_TEXT, 4),              # 零宽空格不占宽
+            ("a" + FAMILY + "b", 4),     # 集群与普通字符混排
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(fixed.display_width(text), expected)
+
+    def test_emoji_rows_align(self):
+        """含 ZWJ / VS16 / 区域指示符的行与普通行对齐到同一列。"""
+        rows = [
+            ["abcd", "c1"],
+            [FAMILY, "c2"],
+            [RAINBOW_FLAG, "c3"],
+            [AIRPLANE, "c4"],
+            [FLAG_CN, "c5"],
+            [THUMBS_UP, "c6"],
+        ]
+        lines = fixed.render(rows)
+        starts = [col2_start(line, cell) for line, (_, cell) in zip(lines, rows)]
+        self.assertEqual(len(set(starts)), 1, msg=str(list(zip(rows, starts))))
 
     def test_tab_policy_consistent(self):
         # 全流程一致：对齐、截断、折行都先按列位展开
