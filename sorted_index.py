@@ -7,11 +7,12 @@ Storage layout:
 
 Concurrency model:
     Blocks are *immutable once published*. Every mutation builds new
-    block objects for the affected ranges and then atomically swaps the
-    block-list reference (under a write lock). A reader that grabbed the
-    previous reference keeps a fully consistent snapshot: it sees either
-    the complete state before a delete or the complete state after it,
-    never an intermediate state.
+    block objects for the affected ranges and then publishes a single
+    ``_Version`` object (block list + block starts + size) with one
+    atomic reference swap (under a write lock). Readers load that one
+    reference exactly once per operation, so they always see a
+    self-consistent view: either the complete state before a delete or
+    the complete state after it, never an intermediate mix.
 
 Space reclamation:
     Point deletes keep the block's slot arrays (free slots become
@@ -93,6 +94,23 @@ def _clone_with_value(block, pos, value):
     return nb
 
 
+class _Version:
+    """One atomically published state of the index.
+
+    The block list, the per-block start keys, and the logical size are
+    always replaced together as a single object, so a reader that loads
+    the version reference once can never observe a mix of two states
+    (e.g. new blocks paired with a stale size or stale starts).
+    """
+
+    __slots__ = ("blocks", "starts", "size")
+
+    def __init__(self, blocks, size):
+        self.blocks = blocks
+        self.starts = [b.keys[0] for b in blocks]
+        self.size = size
+
+
 class Snapshot:
     """Immutable view of an index at a point in time."""
 
@@ -131,9 +149,7 @@ class SortedIndex:
             raise ValueError("block_capacity must be >= 2")
         self._block_capacity = block_capacity
         self._lock = threading.Lock()
-        self._blocks = []
-        self._starts = []
-        self._size = 0
+        self._version = _Version([], 0)
         for k, v in pairs:
             self.put(k, v)
 
@@ -146,25 +162,26 @@ class SortedIndex:
         for i in range(0, len(pairs), idx._block_capacity):
             blocks.append(_block_from_pairs(pairs[i : i + idx._block_capacity],
                                             idx._block_capacity))
-        idx._blocks = blocks
-        idx._starts = [b.keys[0] for b in blocks]
-        idx._size = len(pairs)
+        idx._version = _Version(blocks, len(pairs))
         return idx
 
     # ---------------------------------------------------------- reads
     def snapshot(self):
         """Return an immutable, consistent view of the current state."""
-        return Snapshot(self._blocks, self._size)
+        version = self._version
+        return Snapshot(version.blocks, version.size)
 
     def __len__(self):
-        return self._size
+        return self._version.size
 
     def __contains__(self, key):
-        found, _, _, _ = self._locate_in(self._starts, self._blocks, key)
+        version = self._version
+        found, _, _, _ = self._locate_in(version.starts, version.blocks, key)
         return found
 
     def get(self, key, default=None):
-        found, block, pos, _ = self._locate_in(self._starts, self._blocks, key)
+        version = self._version
+        found, block, pos, _ = self._locate_in(version.starts, version.blocks, key)
         if not found:
             return default
         return block.vals[pos]
@@ -190,26 +207,27 @@ class SortedIndex:
         return found, block, pos, i
 
     # ---------------------------------------------------------- writes
-    def _publish(self, blocks):
-        self._blocks = blocks
-        self._starts = [b.keys[0] for b in blocks]
+    def _publish(self, blocks, size):
+        # Single reference swap: blocks, starts and size become visible
+        # to readers together, never piecemeal.
+        self._version = _Version(blocks, size)
 
     def put(self, key, value):
         with self._lock:
-            blocks, starts = self._blocks, self._starts
+            version = self._version
+            blocks, starts = version.blocks, version.starts
             if not blocks:
                 nb = _Block(self._block_capacity)
                 nb.keys[0] = key
                 nb.vals[0] = value
                 nb.count = 1
-                self._publish([nb])
-                self._size = 1
+                self._publish([nb], 1)
                 return
             found, block, pos, i = self._locate_in(starts, blocks, key)
             new_blocks = list(blocks)
             if found:
                 new_blocks[i] = _clone_with_value(block, pos, value)
-                self._publish(new_blocks)
+                self._publish(new_blocks, version.size)
                 return
             if block.count < block.capacity:
                 new_blocks[i] = _clone_with_insert(block, pos, key, value)
@@ -220,33 +238,32 @@ class SortedIndex:
                 left = _block_from_pairs(pairs[:mid], self._block_capacity)
                 right = _block_from_pairs(pairs[mid:], self._block_capacity)
                 new_blocks[i : i + 1] = [left, right]
-            self._publish(new_blocks)
-            self._size += 1
+            self._publish(new_blocks, version.size + 1)
 
     __setitem__ = put
 
     def delete(self, key):
         """Remove ``key``; raises KeyError if absent."""
         with self._lock:
-            blocks, starts = self._blocks, self._starts
+            version = self._version
+            blocks, starts = version.blocks, version.starts
             found, block, pos, i = self._locate_in(starts, blocks, key)
             if not found:
                 raise KeyError(key)
-            self._delete_at(blocks, i, block, pos)
-            self._size -= 1
+            self._delete_at(blocks, i, block, pos, version.size)
 
     def discard(self, key):
         """Remove ``key`` if present; return whether it was removed."""
         with self._lock:
-            blocks, starts = self._blocks, self._starts
+            version = self._version
+            blocks, starts = version.blocks, version.starts
             found, block, pos, i = self._locate_in(starts, blocks, key)
             if not found:
                 return False
-            self._delete_at(blocks, i, block, pos)
-            self._size -= 1
+            self._delete_at(blocks, i, block, pos, version.size)
             return True
 
-    def _delete_at(self, blocks, i, block, pos):
+    def _delete_at(self, blocks, i, block, pos, size):
         # Point deletes keep the block's slot capacity: freed slots stay
         # available for future inserts (visible as fragmentation).
         if block.count == 1:
@@ -254,7 +271,7 @@ class SortedIndex:
         else:
             new_blocks = list(blocks)
             new_blocks[i] = _clone_without(block, pos)
-        self._publish(new_blocks)
+        self._publish(new_blocks, size - 1)
 
     def delete_range(self, lo, hi):
         """Delete every key in the half-open interval [lo, hi).
@@ -266,7 +283,8 @@ class SortedIndex:
         if not lo < hi:
             return 0
         with self._lock:
-            blocks = self._blocks
+            version = self._version
+            blocks = version.blocks
             if not blocks:
                 return 0
             new_blocks = []
@@ -291,6 +309,5 @@ class SortedIndex:
                         new_blocks.append(_block_from_pairs(survivors))
                     changed = True
             if changed:
-                self._publish(new_blocks)
-                self._size -= removed
+                self._publish(new_blocks, version.size - removed)
             return removed

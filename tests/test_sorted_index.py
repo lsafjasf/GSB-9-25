@@ -193,6 +193,49 @@ class ReclamationTest(unittest.TestCase):
 
 
 class ConcurrencyTest(unittest.TestCase):
+    def test_point_reads_never_observe_torn_state(self):
+        # Keys outside every deleted range must remain readable with
+        # their correct values at all times; a publish that exposed
+        # new blocks with stale starts (or vice versa) would misroute
+        # the lookup and report them missing or crash.
+        n = 20_000
+        idx = make_index(range(n), block_capacity=64)
+        sentinels = [0, 1, 42, 499, 19_500, 19_999]
+        errors = []
+        stop = threading.Event()
+        barrier = threading.Barrier(5)
+
+        def reader():
+            barrier.wait()
+            while not stop.is_set():
+                for k in sentinels:
+                    try:
+                        present = k in idx
+                        value = idx.get(k)
+                    except IndexError:
+                        errors.append(f"lookup of kept key {k} crashed")
+                        return
+                    if not present:
+                        errors.append(f"kept key {k} reported missing")
+                        return
+                    if value != k * 10:
+                        errors.append(f"kept key {k} read back {value!r}")
+                        return
+
+        threads = [threading.Thread(target=reader) for _ in range(4)]
+        for t in threads:
+            t.start()
+        barrier.wait()
+        # 190 adjacent range deletes through the middle of the index
+        for lo in range(1_000, 19_000, 100):
+            idx.delete_range(lo, lo + 100)
+        stop.set()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual([k for k, _ in idx.items()],
+                         list(range(1_000)) + list(range(19_000, n)))
+
     def test_readers_see_before_or_after_state(self):
         n = 30_000
         lo, hi = 7_500, 22_500
@@ -213,6 +256,11 @@ class ConcurrencyTest(unittest.TestCase):
                     return
                 if keys != before_keys and keys != after_keys:
                     errors.append("reader observed intermediate state")
+                    return
+                # a deleted boundary key must never coexist with the
+                # post-delete size, nor a kept key with the pre-delete size
+                if (lo in keys) != (len(keys) == n):
+                    errors.append("boundary key inconsistent with size")
                     return
 
         threads = [threading.Thread(target=reader) for _ in range(4)]
