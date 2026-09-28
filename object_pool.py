@@ -7,8 +7,9 @@
 池关闭：close() 销毁全部空闲对象、唤醒所有等待者（抛 PoolClosed）；
     在途（已借出未归还）对象在归还时被销毁而不再入池；
     关闭后再 acquire 立即抛 PoolClosed；close() 幂等。
-归还校验：重复归还或归还外来对象抛 ReleaseError，
-    保证任一时刻同一对象只被一个调用方持有。
+归还校验：release 只接受 acquire 签发的借出凭据（Lease）。凭据按次签发、
+    归还即失效；同一对象被再次借出时签发的是新凭据，旧凭据的“陈旧归还”
+    会被 ReleaseError 拒绝，保证任一时刻同一对象只被一个调用方持有。
 计数：stats() 返回 (idle, in_use, total, peak)，任意时刻满足
     total == idle + in_use、0 <= total <= max_size、
     total <= peak <= max_size；check_invariants() 可断言这些不变量。
@@ -31,12 +32,30 @@ class PoolTimeout(TimeoutError):
 
 
 class ReleaseError(Exception):
-    """非法归还：对象不属于本池，或同一对象被重复归还。"""
+    """非法归还：凭据不属于本池、已失效（重复归还）或已陈旧（对象被再次借出）。"""
 
 
 PoolStats = collections.namedtuple(
     "PoolStats", ["idle", "in_use", "total", "peak", "max_size", "closed"]
 )
+
+
+class Lease:
+    """借出凭据：每次成功 acquire 签发一个全新凭据，release 必须出示。
+
+    凭据按对象身份（identity）唯一，且仅在本次借出期间有效：
+    归还后立即失效；对象被再次借出时签发的是另一个凭据。
+    因此持有旧凭据的调用方无法把他人正在使用的对象“还”回池里，
+    从机制上杜绝陈旧二次归还导致的双重持有。
+    """
+
+    __slots__ = ("obj",)
+
+    def __init__(self, obj):
+        self.obj = obj
+
+    def __repr__(self):
+        return "<Lease obj=%r>" % (self.obj,)
 
 
 def _default_destructor(obj):
@@ -48,7 +67,6 @@ def _default_destructor(obj):
 class ObjectPool:
     """限制最大对象数、复用开销较大对象的线程安全池。
 
-    对象必须可哈希（普通对象默认即可），因为内部用集合跟踪在途对象。
     factory 在池内部锁下调用以保证计数在任意时刻都与实际一致，
     因此 factory 应当尽量快；慢工厂只会串行化“新建”，不影响已有对象的并发借还。
     """
@@ -68,7 +86,10 @@ class ObjectPool:
 
     # ------------------------------------------------------------------ 获取
     def acquire(self, timeout=None):
-        """获取一个对象。超时抛 PoolTimeout；池关闭抛 PoolClosed。"""
+        """借出一个对象，返回其借出凭据（Lease，用 lease.obj 取对象）。
+
+        超时抛 PoolTimeout；池关闭抛 PoolClosed。
+        """
         with self._cond:
             deadline = None if timeout is None else time.monotonic() + timeout
             while True:
@@ -76,8 +97,9 @@ class ObjectPool:
                     raise PoolClosed("pool is closed")
                 if self._idle:
                     obj = self._idle.popleft()
-                    self._in_use.add(obj)
-                    return obj
+                    lease = Lease(obj)
+                    self._in_use.add(lease)
+                    return lease
                 if self._total < self._max_size:
                     self._total += 1
                     self._peak = max(self._peak, self._total)
@@ -87,8 +109,9 @@ class ObjectPool:
                         self._total -= 1  # 工厂失败：回滚计数，保持守恒
                         self._cond.notify()
                         raise
-                    self._in_use.add(obj)
-                    return obj
+                    lease = Lease(obj)
+                    self._in_use.add(lease)
+                    return lease
                 # 池已满：等待归还或关闭
                 if deadline is None:
                     self._cond.wait()
@@ -103,21 +126,26 @@ class ObjectPool:
     @contextlib.contextmanager
     def item(self, timeout=None):
         """上下文管理器：异常路径也通过 finally 保证归还。"""
-        obj = self.acquire(timeout=timeout)
+        lease = self.acquire(timeout=timeout)
         try:
-            yield obj
+            yield lease.obj
         finally:
-            self.release(obj)
+            self.release(lease)
 
     # ------------------------------------------------------------------ 归还
-    def release(self, obj):
-        """归还对象。重复归还/外来对象抛 ReleaseError。"""
+    def release(self, lease):
+        """归还对象。只接受当前在途的借出凭据（Lease）。
+
+        重复归还、陈旧凭据（归还后对象已被他人再次借出）、
+        外来对象或伪造凭据均抛 ReleaseError。
+        """
         with self._cond:
-            if obj not in self._in_use:
+            if lease not in self._in_use:
                 raise ReleaseError(
-                    "object was not checked out from this pool (double release?)"
+                    "invalid or stale checkout lease (double release?)"
                 )
-            self._in_use.discard(obj)
+            self._in_use.discard(lease)
+            obj = lease.obj
             if self._closed:
                 # 池已关闭：在途对象归还时销毁，不再入池
                 self._total -= 1
@@ -162,7 +190,12 @@ class ObjectPool:
             )
             assert 0 <= self._total <= self._max_size
             assert self._total <= self._peak <= self._max_size
-            assert not set(self._idle) & self._in_use, "idle/in_use 必须互斥"
+            in_use_ids = {id(lease.obj) for lease in self._in_use}
+            assert len(in_use_ids) == len(self._in_use), (
+                "同一对象不得同时拥有多个在途凭据"
+            )
+            idle_ids = {id(obj) for obj in self._idle}
+            assert not idle_ids & in_use_ids, "idle/in_use 必须互斥"
             assert not (self._closed and self._idle), "closed pool must be empty"
             return True
 

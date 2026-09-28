@@ -2,9 +2,11 @@
 
 运行：python3 -m unittest test_object_pool -v
 覆盖：异常路径归还、并发获取/归还的独占不变量、计数不变量、
-      获取超时语义、池关闭语义（在途对象 / 等待者 / 关闭后获取）。
+      获取超时语义、池关闭语义（在途对象 / 等待者 / 关闭后获取）、
+      陈旧二次归还（借出凭据失效校验）。
 """
 
+import collections
 import threading
 import time
 import unittest
@@ -50,13 +52,13 @@ class TestExceptionPath(unittest.TestCase):
 
     def test_try_finally_releases_on_exception(self):
         pool = make_pool(max_size=1)
-        conn = pool.acquire()
+        lease = pool.acquire()
         try:
             raise RuntimeError("业务异常")
         except RuntimeError:
             pass
         finally:
-            pool.release(conn)
+            pool.release(lease)
         stats = pool.stats()
         self.assertEqual((stats.idle, stats.in_use, stats.total), (1, 0, 1))
         pool.check_invariants()
@@ -75,20 +77,20 @@ class TestExceptionPath(unittest.TestCase):
             pool.acquire()
         stats = pool.stats()
         self.assertEqual((stats.idle, stats.in_use, stats.total), (0, 0, 0))
-        conn = pool.acquire(timeout=0.1)  # 工厂失败后仍可正常获取
-        self.assertIsInstance(conn, FakeConnection)
+        lease = pool.acquire(timeout=0.1)  # 工厂失败后仍可正常获取
+        self.assertIsInstance(lease.obj, FakeConnection)
         pool.check_invariants()
 
 
 class TestDoubleRelease(unittest.TestCase):
-    """缺陷2 回归：重复归还/非法归还被拒绝。"""
+    """缺陷2 回归：重复归还/非法归还/陈旧归还被拒绝。"""
 
     def test_double_release_raises(self):
         pool = make_pool(max_size=1)
-        conn = pool.acquire()
-        pool.release(conn)
+        lease = pool.acquire()
+        pool.release(lease)
         with self.assertRaises(ReleaseError):
-            pool.release(conn)
+            pool.release(lease)
         stats = pool.stats()
         self.assertEqual((stats.idle, stats.in_use, stats.total), (1, 0, 1))
         pool.check_invariants()
@@ -97,6 +99,149 @@ class TestDoubleRelease(unittest.TestCase):
         pool = make_pool(max_size=1)
         with self.assertRaises(ReleaseError):
             pool.release(FakeConnection())
+        pool.check_invariants()
+
+    def test_raw_object_is_not_a_credential(self):
+        # 归还只认凭据：直接拿对象本身归还同样被拒绝
+        pool = make_pool(max_size=1)
+        lease = pool.acquire()
+        with self.assertRaises(ReleaseError):
+            pool.release(lease.obj)
+        pool.release(lease)  # 凭据本身仍可正常归还
+        pool.check_invariants()
+
+
+class TestStaleRelease(unittest.TestCase):
+    """陈旧二次归还：旧凭据失效后，无法把他人持有的对象“还”回池里。"""
+
+    def test_stale_lease_rejected_after_recheckout(self):
+        # 确定性时序：甲归还 -> 乙借到同一对象 -> 甲用旧凭据再次归还
+        pool = make_pool(max_size=1)
+        lease_a = pool.acquire()
+        obj = lease_a.obj
+        pool.release(lease_a)
+
+        lease_b = pool.acquire()
+        self.assertIs(lease_b.obj, obj)      # 乙复用了同一对象
+        self.assertIsNot(lease_b, lease_a)   # 但签发的是新凭据
+
+        with self.assertRaises(ReleaseError):  # 甲的陈旧归还被拒绝
+            pool.release(lease_a)
+
+        # 对象仍只在乙手中：第三方此时获取必须超时，而不是拿到同一对象
+        with self.assertRaises(PoolTimeout):
+            pool.acquire(timeout=0.05)
+        stats = pool.stats()
+        self.assertEqual((stats.idle, stats.in_use, stats.total), (0, 1, 1))
+        pool.check_invariants()
+
+    def test_concurrent_stale_release_keeps_exclusivity(self):
+        # 并发版：甲归还、乙持有、丙等待三方交错，
+        # 断言同一对象在任何时刻只被一个调用方持有
+        pool = make_pool(max_size=1)
+        lease_a = pool.acquire()
+        obj = lease_a.obj
+
+        a_released = threading.Event()
+        b_holding = threading.Event()
+        c_attempting = threading.Event()
+        c_done = threading.Event()
+        finish = threading.Event()
+        outcomes = {}
+        violations = []
+
+        def holder_b():
+            a_released.wait(2)
+            lease_b = pool.acquire(timeout=2)
+            outcomes["lease_b"] = lease_b
+            b_holding.set()
+            finish.wait(2)
+            pool.release(lease_b)
+
+        def waiter_c():
+            # 第三方：在乙持有期间尝试获取，必须超时而非拿到同一对象
+            b_holding.wait(2)
+            c_attempting.set()
+            try:
+                lease_c = pool.acquire(timeout=0.2)
+            except PoolTimeout:
+                outcomes["c"] = "timeout"
+            else:
+                violations.append("乙持有期间第三方拿到了同一对象")
+                pool.release(lease_c)
+            finally:
+                c_done.set()
+
+        tb = threading.Thread(target=holder_b)
+        tc = threading.Thread(target=waiter_c)
+        tb.start()
+        tc.start()
+
+        pool.release(lease_a)  # 甲正常归还
+        a_released.set()
+        self.assertTrue(b_holding.wait(2))
+        self.assertTrue(c_attempting.wait(2))
+        time.sleep(0.05)  # 确认丙已阻塞在获取上
+
+        # 甲的陈旧二次归还（与乙的持有、丙的等待并发）：必须被拒绝
+        with self.assertRaises(ReleaseError):
+            pool.release(lease_a)
+
+        # 丙必须在乙仍持有期间超时，而不是拿到同一对象
+        self.assertTrue(c_done.wait(2))
+        finish.set()
+        tb.join(2)
+        tc.join(2)
+
+        self.assertIs(outcomes["lease_b"].obj, obj)
+        self.assertEqual(outcomes.get("c"), "timeout")
+        self.assertEqual(violations, [])
+        stats = pool.stats()
+        self.assertEqual((stats.idle, stats.in_use, stats.total), (1, 0, 1))
+        pool.check_invariants()
+
+    def test_stale_release_storm(self):
+        # 压力版：多线程正常借还的同时，破坏者持续用已失效的旧凭据尝试归还
+        pool = make_pool(max_size=2)
+        retired = collections.deque(maxlen=64)  # 已归还、已失效的凭据
+        retired_lock = threading.Lock()
+        violations = []
+        stop = threading.Event()
+
+        def worker():
+            for _ in range(200):
+                lease = pool.acquire(timeout=5)
+                time.sleep(0)
+                pool.release(lease)
+                with retired_lock:
+                    retired.append(lease)
+
+        def saboteur():
+            while not stop.is_set():
+                with retired_lock:
+                    stale = list(retired)
+                for lease in stale:
+                    try:
+                        pool.release(lease)
+                    except ReleaseError:
+                        pass
+                    else:
+                        violations.append("陈旧凭据归还成功，独占性被破坏")
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        sab = threading.Thread(target=saboteur)
+        sab.start()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        stop.set()
+        sab.join()
+
+        self.assertEqual(violations, [])
+        stats = pool.stats()
+        self.assertEqual(stats.in_use, 0)
+        self.assertEqual(stats.idle, stats.total)
         pool.check_invariants()
 
 
@@ -137,10 +282,10 @@ class TestTimeout(unittest.TestCase):
     def test_acquired_object_is_never_destroyed(self):
         # 缺陷4 回归：超时路径附近返回的对象必须未被销毁
         pool = make_pool(max_size=1)
-        first = pool.acquire()
-        pool.release(first)
+        lease = pool.acquire()
+        pool.release(lease)
         got = pool.acquire(timeout=0.5)
-        self.assertFalse(got.closed)
+        self.assertFalse(got.obj.closed)
         pool.check_invariants()
 
 
@@ -153,7 +298,7 @@ class TestClose(unittest.TestCase):
         pool.release(a)
         pool.release(b)
         pool.close()
-        self.assertTrue(a.closed and b.closed)
+        self.assertTrue(a.obj.closed and b.obj.closed)
         stats = pool.stats()
         self.assertEqual((stats.idle, stats.in_use, stats.total), (0, 0, 0))
         self.assertTrue(stats.closed)
@@ -180,11 +325,11 @@ class TestClose(unittest.TestCase):
 
     def test_inflight_object_destroyed_on_release_after_close(self):
         pool = make_pool(max_size=1)
-        conn = pool.acquire()
+        lease = pool.acquire()
         pool.close()
-        self.assertFalse(conn.closed)  # 在途对象不被提前销毁
-        pool.release(conn)             # 归还时销毁，不再入池
-        self.assertTrue(conn.closed)
+        self.assertFalse(lease.obj.closed)  # 在途对象不被提前销毁
+        pool.release(lease)                 # 归还时销毁，不再入池
+        self.assertTrue(lease.obj.closed)
         stats = pool.stats()
         self.assertEqual((stats.idle, stats.in_use, stats.total), (0, 0, 0))
         pool.check_invariants()
@@ -205,22 +350,22 @@ class TestClose(unittest.TestCase):
         # 缺陷4 回归：归还与关闭并发时，获取方要么拿到活对象，要么抛异常
         for _ in range(50):
             pool = make_pool(max_size=1)
-            conn = pool.acquire()
+            lease = pool.acquire()
             outcome = {}
 
             def waiter():
                 try:
-                    outcome["conn"] = pool.acquire(timeout=1)
+                    outcome["lease"] = pool.acquire(timeout=1)
                 except (PoolClosed, PoolTimeout) as exc:
                     outcome["error"] = exc
 
             t = threading.Thread(target=waiter)
             t.start()
-            pool.release(conn)
+            pool.release(lease)
             pool.close()
             t.join()
-            if "conn" in outcome:
-                self.assertFalse(outcome["conn"].closed)
+            if "lease" in outcome:
+                self.assertFalse(outcome["lease"].obj.closed)
             else:
                 self.assertIsInstance(outcome["error"], PoolClosed)
             pool.check_invariants()
@@ -246,10 +391,11 @@ class TestConcurrency(unittest.TestCase):
             nonlocal concurrent, max_concurrent
             for _ in range(self.ROUNDS):
                 try:
-                    conn = pool.acquire(timeout=5)
+                    lease = pool.acquire(timeout=5)
                 except PoolTimeout:
                     violations.append("unexpected PoolTimeout")
                     return
+                conn = lease.obj
                 with held_lock:
                     if conn in held:
                         violations.append(
@@ -266,7 +412,7 @@ class TestConcurrency(unittest.TestCase):
                 with held_lock:
                     held.pop(conn, None)
                     concurrent -= 1
-                pool.release(conn)
+                pool.release(lease)
 
         def monitor():
             # 在并发进行期间持续断言计数不变量
@@ -343,7 +489,7 @@ class TestCounters(unittest.TestCase):
         pool.release(b)
         self.assertEqual(pool.stats()[:4], (2, 0, 2, 2))
         c = pool.acquire()  # 复用空闲对象，不新建
-        self.assertIn(c, (a, b))
+        self.assertIn(c.obj, (a.obj, b.obj))
         self.assertEqual(pool.stats()[:4], (1, 1, 2, 2))
         pool.close()
         pool.release(c)  # 关闭后归还：销毁并扣减
