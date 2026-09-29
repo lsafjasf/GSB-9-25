@@ -1,31 +1,19 @@
-"""利用率对比 + 规模耗时基准。运行: python3 benchmark.py"""
+"""策略对比基准 + 可切换单次运行。
 
+用法：
+  python3 benchmark.py                      # 全策略 × 全数据集对比 + 多容器场景
+  python3 benchmark.py run --order area_desc --select baf \
+      --dataset mixed --n 200 --max-height 500 --containers 3 --rotate
+"""
+
+import argparse
 import random
 import time
 
-from rectpack import pack
+from rectpack import (SelectRule, SortOrder, StripPacker, pack, pack_multi)
 
-
-def naive_shelf(width, rects):
-    """朴素策略：按面积降序排序 + Shelf（逐层水平摆放）。"""
-    items = sorted(enumerate(rects), key=lambda t: -(t[1][0] * t[1][1]))
-    x = y = shelf_h = 0.0
-    unplaced = []
-    placed_area = 0.0
-    for i, (w, h) in items:
-        if w > width:
-            unplaced.append(i)
-            continue
-        if x + w > width:
-            y += shelf_h
-            x = 0.0
-            shelf_h = 0.0
-        x += w
-        shelf_h = max(shelf_h, h)
-        placed_area += w * h
-    height = y + shelf_h
-    util = placed_area / (width * height) if height > 0 else 0.0
-    return height, util, unplaced
+ORDERS = [SortOrder.AREA_DESC, SortOrder.HEIGHT_DESC, SortOrder.MAXSIDE_DESC]
+SELECTS = [SelectRule.BSSF, SelectRule.BAF]
 
 
 def gen_dataset(kind, n, seed):
@@ -43,30 +31,61 @@ def gen_dataset(kind, n, seed):
     raise ValueError(kind)
 
 
-def compare_utilization():
-    print("=== 利用率对比：MaxRects(BSSF) vs 朴素Shelf(面积降序) ===")
-    print(f"{'数据集':<10}{'n':>5}{'模式':>8}{'朴素高度':>10}{'朴素利用率':>10}"
-          f"{'MaxRects高度':>12}{'MaxRects利用率':>13}{'高度降低':>9}")
-    width = 200
+def compare_strategies(width=200, n=200, seeds=range(5), rotate=False):
+    """每种 排序×选择 策略在各数据集上的利用率 / 高度 / 耗时对比。"""
+    print(f"=== 策略对比（容器宽 {width}，n={n}，{len(list(seeds))} 个种子取平均，"
+          f"{'旋转' if rotate else '不旋转'}） ===")
+    header = (f"{'数据集':<9}{'排序策略':<13}{'选择策略':<9}"
+              f"{'高度':>9}{'利用率':>9}{'耗时(ms)':>10}{'未放置':>7}")
+    print(header)
     for kind in ("uniform", "mixed", "skewed", "squares"):
-        for rotate in (False, True):
-            hs, us, hs2, us2 = [], [], [], []
-            for seed in range(5):
-                rects = gen_dataset(kind, 200, seed)
-                h0, u0, _ = naive_shelf(width, rects)
-                res = pack(width, rects, allow_rotate=rotate)
-                assert not res.unplaced
-                hs.append(h0); us.append(u0)
-                hs2.append(res.height); us2.append(res.utilization)
-            h0, u0 = sum(hs) / 5, sum(us) / 5
-            h1, u1 = sum(hs2) / 5, sum(us2) / 5
-            gain = (h0 - h1) / h0 * 100
-            print(f"{kind:<10}{200:>5}{('旋转' if rotate else '不旋转'):>8}"
-                  f"{h0:>10.1f}{u0:>10.2%}{h1:>12.1f}{u1:>13.2%}{gain:>8.1f}%")
+        for order in ORDERS:
+            for sel in SELECTS:
+                hs, us, ts, ups = [], [], [], 0
+                for seed in seeds:
+                    rects = gen_dataset(kind, n, seed)
+                    t0 = time.perf_counter()
+                    res = pack(width, rects, allow_rotate=rotate,
+                               sort=order, select=sel)
+                    ts.append((time.perf_counter() - t0) * 1000)
+                    hs.append(res.height)
+                    us.append(res.utilization)
+                    ups += len(res.unplaced)
+                m = len(list(seeds))
+                print(f"{kind:<9}{order.value:<13}{sel.value:<9}"
+                      f"{sum(hs)/m:>9.1f}{sum(us)/m:>9.2%}"
+                      f"{sum(ts)/m:>10.2f}{ups:>7}")
+        print("-" * len(header.expandtabs()))
+
+
+def compare_multi_container(width=200, max_height=400, n=300, seeds=range(5)):
+    """高度上限 + 多容器场景：各策略所需容器数 / 总利用率 / 未放置数 / 耗时。"""
+    print(f"\n=== 多容器场景（容器宽 {width}，单容器高度上限 {max_height}，"
+          f"n={n}，{len(list(seeds))} 个种子取平均） ===")
+    print(f"{'数据集':<9}{'排序策略':<13}{'选择策略':<9}"
+          f"{'容器数':>7}{'总利用率':>9}{'未放置':>7}{'耗时(ms)':>10}")
+    for kind in ("uniform", "mixed", "skewed", "squares"):
+        for order in ORDERS:
+            for sel in SELECTS:
+                cs, us, ts, ups = [], [], [], 0
+                for seed in seeds:
+                    rects = gen_dataset(kind, n, seed)
+                    t0 = time.perf_counter()
+                    res = pack_multi(width, rects, sort=order, select=sel,
+                                     max_height=max_height)
+                    ts.append((time.perf_counter() - t0) * 1000)
+                    cs.append(len(res.containers))
+                    us.append(res.utilization)
+                    ups += len(res.unplaced)
+                m = len(list(seeds))
+                print(f"{kind:<9}{order.value:<13}{sel.value:<9}"
+                      f"{sum(cs)/m:>7.1f}{sum(us)/m:>9.2%}"
+                      f"{ups:>7}{sum(ts)/m:>10.2f}")
+        print()
 
 
 def scale_timing():
-    print("\n=== 规模与耗时（容器宽 400，矩形 5~60，不旋转） ===")
+    print("=== 规模与耗时（容器宽 400，uniform 5~60，不旋转，BSSF/长边降序） ===")
     print(f"{'n':>7}{'耗时(ms)':>12}{'高度':>10}{'利用率':>9}{'ns/矩形':>12}")
     for n in (1000, 2000, 4000, 8000):
         rects = gen_dataset("uniform", n, seed=99)
@@ -78,6 +97,59 @@ def scale_timing():
               f"{dt * 1e6 / n:>12.0f}")
 
 
+def run_single(args):
+    rects = gen_dataset(args.dataset, args.n, args.seed)
+    packer = StripPacker(args.width, allow_rotate=args.rotate,
+                         sort=SortOrder(args.order),
+                         select=SelectRule(args.select),
+                         max_height=args.max_height)
+    t0 = time.perf_counter()
+    if args.containers is not None or args.max_height is not None:
+        res = packer.pack_multi(rects, max_containers=args.containers)
+        dt = (time.perf_counter() - t0) * 1000
+        print(f"策略: order={args.order} select={args.select} "
+              f"rotate={args.rotate} max_height={args.max_height}")
+        print(f"容器数: {len(res.containers)}  总利用率: {res.utilization:.2%}  "
+              f"耗时: {dt:.2f} ms")
+        for i, c in enumerate(res.containers):
+            print(f"  容器#{i}: 高度={c.height:.0f} 利用率={c.utilization:.2%} "
+                  f"已放置={len(c.placements)}")
+        print(f"未放置矩形: {res.unplaced}")
+    else:
+        res = packer.pack(rects)
+        dt = (time.perf_counter() - t0) * 1000
+        print(f"策略: order={args.order} select={args.select} rotate={args.rotate}")
+        print(f"高度: {res.height:.0f}  利用率: {res.utilization:.2%}  "
+              f"耗时: {dt:.2f} ms")
+        print(f"未放置矩形: {res.unplaced}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    rp = sub.add_parser("run", help="按指定策略单次运行")
+    rp.add_argument("--order", default="maxside_desc",
+                    choices=[o.value for o in SortOrder])
+    rp.add_argument("--select", default="bssf",
+                    choices=[s.value for s in SelectRule])
+    rp.add_argument("--dataset", default="uniform",
+                    choices=["uniform", "mixed", "skewed", "squares"])
+    rp.add_argument("--n", type=int, default=200)
+    rp.add_argument("--width", type=float, default=200)
+    rp.add_argument("--seed", type=int, default=0)
+    rp.add_argument("--rotate", action="store_true")
+    rp.add_argument("--max-height", type=float, default=None)
+    rp.add_argument("--containers", type=int, default=None,
+                    help="容器数量上限（配合 --max-height 使用）")
+    args = ap.parse_args()
+    if args.cmd == "run":
+        run_single(args)
+    else:
+        compare_strategies()
+        compare_multi_container()
+        scale_timing()
+
+
 if __name__ == "__main__":
-    compare_utilization()
-    scale_timing()
+    main()
