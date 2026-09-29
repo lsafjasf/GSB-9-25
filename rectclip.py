@@ -17,6 +17,30 @@ R4 端点恰好落在角上 / 边上：属于"边界"，判定为相交；裁剪
 R5 相切（线段与矩形仅接触一点，距离恰为 0）：判定为相交；
    裁剪返回一个零长度结果段（t0 == t1），方向信息退化为点。
 
+相交分类（classify_* 系列，替代/细化布尔结论）
+----------------------------------------------
+IntersectionKind 五类，互斥且穷尽：
+  PROPER             真交：交集含矩形内部的点（正长度穿越，或点被包含）。
+  ENDPOINT_TOUCH     端点接触：唯一接触点且该点是线段端点（R4）。
+  COLLINEAR_OVERLAP  共线重叠：与矩形边共线的正长度重叠，但不进入内部（R3）。
+  TANGENT            相切：接触为单点且位于线段内部（角点相切、退化矩形
+                     单点命中；R5）。
+  DISJOINT           不相交：最短距离 > eps。
+
+退化输入的明确分类与依据：
+  D1 零长度线段 + 矩形：视为点（R1）。点严格在内部 -> PROPER（被包含，
+     属真交的退化形式）；点落在边界上 -> ENDPOINT_TOUCH（点即两个端点）。
+  D2 点矩形：无内部无边，任何命中都是单点接触。命中参数在线段内部
+     -> TANGENT；命中点为线段端点 -> ENDPOINT_TOUCH。
+  D3 线矩形（宽或高为 0）：与线段共线正长度重叠 -> COLLINEAR_OVERLAP；
+     横向穿过为单点命中，规则同 D2（TANGENT / ENDPOINT_TOUCH）。
+  D4 线段-线段：内部-内部单点必为穿越 -> PROPER；接触点含任一端点
+     -> ENDPOINT_TOUCH；共线正长度重叠 -> COLLINEAR_OVERLAP。
+     直线段几何下不存在"内部单点擦触"，故 TANGENT 不由线段-线段返回。
+
+所有 classify_* 返回参数区间 [t0, t1]（原线段参数化 p(t) = p1 + t*(p2-p1)，
+0 <= t0 <= t1 <= 1），方向与参数顺序跟随原线段；区间可由 q = p(t) 复算。
+
 容差（eps）
 -----------
 默认 EPS = 1e-9（绝对容差）。依据：布局坐标量级通常在 1e-3 ~ 1e6，
@@ -28,6 +52,7 @@ float64 在该量级下的舍入误差约 1e-13 ~ 1e-10，1e-9 既远高于舍�
 """
 
 from enum import Enum
+from typing import NamedTuple, Optional
 
 EPS = 1e-9
 
@@ -36,6 +61,34 @@ class PointRectRelation(Enum):
     INSIDE = "inside"      # 严格内部（距每条边都 > eps）
     BOUNDARY = "boundary"  # 在矩形上且距某条边 <= eps（含退化矩形的全部点）
     OUTSIDE = "outside"    # 在矩形外（到矩形的距离 > eps）
+
+
+class IntersectionKind(Enum):
+    PROPER = "proper"                        # 真交
+    ENDPOINT_TOUCH = "endpoint_touch"        # 端点接触
+    COLLINEAR_OVERLAP = "collinear_overlap"  # 共线重叠
+    TANGENT = "tangent"                      # 相切
+    DISJOINT = "disjoint"                    # 不相交
+
+
+class SegRectIntersection(NamedTuple):
+    """线段-矩形分类结果。t/q 在 DISJOINT 时为 None。"""
+    kind: IntersectionKind
+    t0: Optional[float]   # 交集在原线段上的参数区间 [t0, t1]
+    t1: Optional[float]
+    q0: Optional[tuple]   # q0 = p(t0), q1 = p(t1)，q0 -> q1 与原线段同向
+    q1: Optional[tuple]
+    reason: str           # 分类依据（可解释）
+
+
+class SegSegIntersection(NamedTuple):
+    """线段-线段分类结果。t 为 seg1 参数区间，u 为 seg2 参数区间。"""
+    kind: IntersectionKind
+    t0: Optional[float]
+    t1: Optional[float]
+    u0: Optional[float]
+    u1: Optional[float]
+    reason: str
 
 
 def normalize_rect(rect):
@@ -168,3 +221,145 @@ def clip_segment_to_rect(p1, p2, rect, eps=EPS):
     q0 = (x0 + t0 * dx, y0 + t0 * dy)
     q1 = (x0 + t1 * dx, y0 + t1 * dy)
     return (t0, t1, q0, q1)
+
+
+def _strictly_inside(q, rect, eps):
+    xmin, ymin, xmax, ymax = rect
+    return (xmin + eps < q[0] < xmax - eps and
+            ymin + eps < q[1] < ymax - eps)
+
+
+def classify_segment_rect(p1, p2, rect, eps=EPS):
+    """线段-矩形相交分类，返回 SegRectIntersection（含参数区间与依据）。
+
+    分类规则与退化情形的定义见模块 docstring（PROPER/ENDPOINT_TOUCH/
+    COLLINEAR_OVERLAP/TANGENT/DISJOINT 与 D1-D4）。参数区间 [t0, t1]
+    与 clip_segment_to_rect 一致：方向、参数顺序均跟随原线段，
+    可用 q = p1 + t*(p2-p1) 复算。
+    """
+    r = normalize_rect(rect)
+    clip = clip_segment_to_rect(p1, p2, r, eps)
+    if clip is None:
+        return SegRectIntersection(
+            IntersectionKind.DISJOINT, None, None, None, None,
+            "线段到矩形区域的最短距离 > eps，无接触")
+    t0, t1, q0, q1 = clip
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    zero_seg = (dx == 0.0 and dy == 0.0)
+
+    if zero_seg:
+        # D1：零长度线段视为点
+        if _strictly_inside(q0, r, eps):
+            return SegRectIntersection(
+                IntersectionKind.PROPER, t0, t1, q0, q1,
+                "零长度线段（点）严格位于矩形内部：点被区域包含，属真交的退化形式（R1）")
+        return SegRectIntersection(
+            IntersectionKind.ENDPOINT_TOUCH, t0, t1, q0, q1,
+            "零长度线段（点）落在矩形边界上：点即线段的两个端点（R1/R4）")
+
+    contact_len2 = ((q1[0] - q0[0]) ** 2 + (q1[1] - q0[1]) ** 2)
+    if contact_len2 > eps * eps:
+        # 正长度交集：进入内部为真交，否则为与边共线的重叠
+        mid = ((q0[0] + q1[0]) / 2.0, (q0[1] + q1[1]) / 2.0)
+        if _strictly_inside(mid, r, eps):
+            return SegRectIntersection(
+                IntersectionKind.PROPER, t0, t1, q0, q1,
+                "交集为正长度线段且穿过矩形内部（中点严格在内部）")
+        return SegRectIntersection(
+            IntersectionKind.COLLINEAR_OVERLAP, t0, t1, q0, q1,
+            "与矩形边共线的正长度重叠，交集整体在边界上、不进入内部（R3）")
+
+    # 单点接触（接触长度 <= eps）
+    if min((q0[0] - p1[0]) ** 2 + (q0[1] - p1[1]) ** 2,
+           (q0[0] - p2[0]) ** 2 + (q0[1] - p2[1]) ** 2) <= eps * eps:
+        return SegRectIntersection(
+            IntersectionKind.ENDPOINT_TOUCH, t0, t1, q0, q1,
+            "唯一接触点是线段端点，线段其余部分在矩形外（R4）")
+    return SegRectIntersection(
+        IntersectionKind.TANGENT, t0, t1, q0, q1,
+        "线段内部单点擦触边界（角点相切或退化矩形单点命中）（R5）")
+
+
+def classify_segments(p1, p2, p3, p4, eps=EPS):
+    """线段-线段相交分类，返回 SegSegIntersection（双侧参数区间与依据）。
+
+    t 为 seg1 (p1->p2) 的参数区间，u 为 seg2 (p3->p4) 的参数区间，
+    各自按自身参数化升序（方向跟随各自线段）。分类规则见模块 docstring D4。
+    """
+    d1x, d1y = p2[0] - p1[0], p2[1] - p1[1]
+    d2x, d2y = p4[0] - p3[0], p4[1] - p3[1]
+    zero1 = (d1x == 0.0 and d1y == 0.0)
+    zero2 = (d2x == 0.0 and d2y == 0.0)
+
+    if not segments_intersect(p1, p2, p3, p4, eps):
+        return SegSegIntersection(
+            IntersectionKind.DISJOINT, None, None, None, None,
+            "两线段最短距离 > eps，无接触")
+
+    def param_on_seg2(q):
+        """q 在 seg2 上的参数（q 已知在 seg2 上，eps 意义下）。"""
+        if zero2:
+            return 0.0
+        return ((q[0] - p3[0]) * d2x + (q[1] - p3[1]) * d2y) / (d2x * d2x + d2y * d2y)
+
+    def param_on_seg1(q):
+        if zero1:
+            return 0.0
+        return ((q[0] - p1[0]) * d1x + (q[1] - p1[1]) * d1y) / (d1x * d1x + d1y * d1y)
+
+    if zero1 and zero2:
+        return SegSegIntersection(
+            IntersectionKind.ENDPOINT_TOUCH, 0.0, 0.0, 0.0, 0.0,
+            "两条零长度线段（点）重合：点即各自端点（R1）")
+    if zero1 or zero2:
+        # 一条是点：点落在另一条线段上，点即端点
+        q = p1 if zero1 else p3
+        t = param_on_seg1(q)
+        u = param_on_seg2(q)
+        return SegSegIntersection(
+            IntersectionKind.ENDPOINT_TOUCH, t, t, u, u,
+            "零长度线段（点）落在另一线段上：接触点即退化线段的端点（R1）")
+
+    cross = d1x * d2y - d1y * d2x
+    len1 = (d1x * d1x + d1y * d1y) ** 0.5
+    len2 = (d2x * d2x + d2y * d2y) ** 0.5
+
+    if abs(cross) > eps * len1 * len2:
+        # 不平行：唯一交点
+        rx, ry = p3[0] - p1[0], p3[1] - p1[1]
+        t = (rx * d2y - ry * d2x) / cross
+        u = (rx * d1y - ry * d1x) / cross
+        q = (p1[0] + t * d1x, p1[1] + t * d1y)
+        near_end = min(
+            (q[0] - p1[0]) ** 2 + (q[1] - p1[1]) ** 2,
+            (q[0] - p2[0]) ** 2 + (q[1] - p2[1]) ** 2,
+            (q[0] - p3[0]) ** 2 + (q[1] - p3[1]) ** 2,
+            (q[0] - p4[0]) ** 2 + (q[1] - p4[1]) ** 2) <= eps * eps
+        if near_end:
+            return SegSegIntersection(
+                IntersectionKind.ENDPOINT_TOUCH, t, t, u, u,
+                "唯一交点且为某条线段的端点（含端点-端点相接与 T 型相接）")
+        return SegSegIntersection(
+            IntersectionKind.PROPER, t, t, u, u,
+            "两线段内部横向穿越，交点严格位于两条线段内部")
+
+    # 平行且相交（距离 <= eps）：按共线重叠处理
+    ta = param_on_seg1(p3)
+    tb = param_on_seg1(p4)
+    lo, hi = (ta, tb) if ta <= tb else (tb, ta)
+    t0, t1 = max(lo, 0.0), min(hi, 1.0)
+    if (t1 - t0) * len1 > eps:
+        q0 = (p1[0] + t0 * d1x, p1[1] + t0 * d1y)
+        q1 = (p1[0] + t1 * d1x, p1[1] + t1 * d1y)
+        u0, u1 = param_on_seg2(q0), param_on_seg2(q1)
+        if u0 > u1:
+            u0, u1 = u1, u0
+        return SegSegIntersection(
+            IntersectionKind.COLLINEAR_OVERLAP, t0, t1, u0, u1,
+            "两线段共线且重叠长度 > 0（R3）")
+    t = (t0 + t1) / 2.0
+    q = (p1[0] + t * d1x, p1[1] + t * d1y)
+    u = param_on_seg2(q)
+    return SegSegIntersection(
+        IntersectionKind.ENDPOINT_TOUCH, t, t, u, u,
+        "共线但仅端点相接（重叠长度 <= eps）")
