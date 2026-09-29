@@ -155,6 +155,35 @@ check("高优先级压过低优先级", all("rule_z" not in s.detail or s.outcom
 print("---- 冲突留痕示例 ----")
 print(r1.explain())
 
+# 所有命中规则的去向都必须进入规则链：低优先级命中被压制 → suppressed 留痕
+check("低优先级命中规则的去向也留痕(suppressed)",
+      any(s.outcome == "suppressed" and "rule_z" in s.detail for s in r1.trace))
+check("冲突只标记在同优先级之间（rule_z 不出现在 conflict 中）",
+      all("rule_z" not in s.detail for s in r1.trace if s.outcome == "conflict"))
+
+# 仅有优先级差异、无同优先级冲突：不应出现 conflict，但被压制者必须留痕
+snap = make_store(key="f", default="d", rollouts=[
+    {"rule_id": "hi", "value": "H", "percentage": 100, "priority": 9},
+    {"rule_id": "lo", "value": "L", "percentage": 100, "priority": 1},
+]).snapshot()
+r = snap.evaluate("f", user_id="u1", now=NOW)
+check("不同优先级同时命中 → 不标记 conflict",
+      not any(s.outcome == "conflict" for s in r.trace))
+check("被压制的低优先级命中规则进入规则链",
+      any(s.outcome == "suppressed" and "'lo'" in s.detail for s in r.trace))
+check("胜出者仍是最高优先级规则", r.value == "H" and r.reason == "rollout")
+
+# 同优先级同结论：不算冲突，但未胜出的命中规则也要留痕
+snap = make_store(key="f", default="d", rollouts=[
+    {"rule_id": "dup_a", "value": "X", "percentage": 100, "priority": 5},
+    {"rule_id": "dup_b", "value": "X", "percentage": 100, "priority": 5},
+]).snapshot()
+r = snap.evaluate("f", user_id="u1", now=NOW)
+check("同优先级同结论 → 不标记 conflict",
+      not any(s.outcome == "conflict" for s in r.trace))
+check("同结论未胜出的命中规则也留痕",
+      any(s.outcome == "suppressed" and "dup_b" in s.detail for s in r.trace))
+
 # ---------------------------------------------------------------------------
 print("== 5. 边界行为 ==")
 # ---------------------------------------------------------------------------

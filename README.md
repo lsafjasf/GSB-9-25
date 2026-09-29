@@ -6,7 +6,7 @@ Python 3，仅标准库。支持默认值、环境覆盖、用户分桶灰度、
 ## 运行
 
 ```bash
-python3 selftest.py    # 31 项断言 + 分布数据 + 十万次求值基准
+python3 selftest.py    # 38 项断言 + 分布数据 + 十万次求值基准
 python3 - << 'PY'      # 最小示例
 from feature_flags import FlagStore
 store = FlagStore()
@@ -16,7 +16,7 @@ store.load([{"key": "checkout_v2", "default": False,
              "time_window": {"start": "2026-01-01T00:00:00+00:00",
                              "end": "2027-01-01T00:00:00+00:00"}}])
 snap = store.snapshot()          # 一次请求抓一个快照
-print(snap.evaluate("checkout_v2", user_id="u1", env="staging").explain())
+print(snap.evaluate("checkout_v2", user_id="u5", env="staging").explain())
 PY
 ```
 
@@ -35,14 +35,21 @@ PY
 flag='checkout_v2' value='grey' reason=rollout (config v1)
   [hit     ] time_window: 当前时间在窗口内，继续向下求值
   [miss    ] env_override: env='staging' 无覆盖
-  [hit     ] rollout: 规则 'r1' 命中：bucket=5372 < 100.0% → 'grey'
+  [hit     ] rollout: 规则 'r1' 命中：bucket=739 < 25.0% → 'grey'
 ```
+
+（上面就是上面那段最小示例的真实输出：`u5` 的稳定分桶为 739，落入 25% 灰度。）
 
 ## 冲突消解
 
 同优先级多条灰度规则同时命中且结论相反：**按 `rule_id` 字典序取最小者胜出**
 （编译期已排序，消解零成本、跨求值确定一致），并在 trace 中留下
 `outcome=conflict` 的记录（含胜出与被压制规则），同时写 `logging` warning。
+
+所有命中的灰度规则都会在 trace 中留下去向：胜出者记 `hit`；同优先级且结论
+相反的被压制者记入 `conflict`（冲突只标记在同优先级之间）；其余命中但未
+胜出的规则（被更高优先级压制，或同优先级同结论被合并）记 `suppressed`，
+规则链中不存在"命中却不可见"的规则。
 
 ## 边界行为（明确约定）
 

@@ -155,7 +155,7 @@ def compile_flag(raw: Mapping[str, Any]) -> CompiledFlag:
 @dataclass(frozen=True)
 class TraceStep:
     rule: str      # 命中的层级，如 "time_window" / "env_override" / "rollout" / "default"
-    outcome: str   # hit | miss | conflict | error | skip
+    outcome: str   # hit | miss | conflict | suppressed | error | skip
     detail: str
 
 
@@ -275,14 +275,28 @@ class Snapshot:
                     top_priority = hits[0].priority
                     tier = [r for r in hits if r.priority == top_priority]
                     winner = tier[0]  # 已按 rule_id 升序排序 → 确定消解
+                    conflict_losers: list[CompiledRollout] = []
                     if len(tier) > 1 and any(r.value != winner.value for r in tier[1:]):
-                        losers = [r.rule_id for r in tier[1:]]
+                        conflict_losers = list(tier[1:])
+                        losers = [r.rule_id for r in conflict_losers]
                         trace.append(TraceStep(
                             "rollout", "conflict",
                             f"优先级 {top_priority} 处 {len(tier)} 条规则结论冲突，"
                             f"按 rule_id 字典序确定消解：{winner.rule_id!r} 胜出，被压制: {losers}"))
                         logger.warning("flag %s 灰度规则冲突，%s 胜出，被压制: %s",
                                        key, winner.rule_id, losers)
+                    # 所有命中但未胜出的规则都要在规则链里留下去向：
+                    # 同优先级结论冲突者已记入 conflict；其余记 suppressed。
+                    for r in hits:
+                        if r is winner or r in conflict_losers:
+                            continue
+                        if r.priority == top_priority:
+                            detail = (f"规则 {r.rule_id!r} 命中，与 {winner.rule_id!r} 同优先级同结论，"
+                                      f"按 rule_id 字典序未胜出，被合并")
+                        else:
+                            detail = (f"规则 {r.rule_id!r} 命中（优先级 {r.priority}），"
+                                      f"被更高优先级 {top_priority} 的规则 {winner.rule_id!r} 压制")
+                        trace.append(TraceStep("rollout", "suppressed", detail))
                     bucket = stable_bucket(flag.key, user_id, winner.salt)
                     trace.append(TraceStep(
                         "rollout", "hit",
