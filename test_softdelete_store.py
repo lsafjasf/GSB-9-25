@@ -380,5 +380,309 @@ class TestScale(unittest.TestCase):
         self.assertTrue(s.check_invariants())
 
 
+class FakeClock:
+    """可手动推进的假时钟，让删除时间区间筛选可确定性测试。"""
+
+    def __init__(self, start=0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+
+def build_trash_fixture():
+    r"""构造回收站数据（删除时间由假时钟控制）：
+    t=100: delete("a", cascade)   -> a, a1, a2, a1x   (级联根 a)
+    t=200: delete("b")            -> b                 (单删，根层)
+    t=300: delete("c1")           -> c1                (原父 c 存活)
+    t=400: delete("d", cascade)   -> d, d1             (级联根 d，根层)
+    """
+    clock = FakeClock()
+    s = TreeStore(clock=clock)
+    s.add("a", kind="root")
+    s.add("a1", "a", kind="branch")
+    s.add("a2", "a", kind="branch")
+    s.add("a1x", "a1", kind="leaf")
+    s.add("b", kind="leaf")
+    s.add("c", kind="root")
+    s.add("c1", "c", kind="leaf")
+    s.add("d", kind="root")
+    s.add("d1", "d", kind="leaf")
+    clock.now = 100
+    s.delete("a", cascade=True)
+    clock.now = 200
+    s.delete("b")
+    clock.now = 300
+    s.delete("c1")
+    clock.now = 400
+    s.delete("d", cascade=True)
+    return s
+
+
+def page_concat(store, page_size, **filters):
+    """按页拉取并拼接，模拟客户端分页消费。"""
+    items = []
+    for page in store.trash_iter_pages(page_size, **filters):
+        items.extend(page["items"])
+    return items
+
+
+class TestTrashPagination(unittest.TestCase):
+    def test_pages_concat_equals_full_list(self):
+        """核心一致性：各种页大小下，分页拼接与全量列表完全一致。"""
+        s = build_trash_fixture()
+        full = s.trash_query()["items"]
+        self.assertEqual(len(full), 8)
+        for page_size in range(1, 12):
+            self.assertEqual(page_concat(s, page_size), full,
+                             "page_size=%d 时拼接结果与全量不一致" % page_size)
+
+    def test_pages_concat_equals_full_list_with_filters(self):
+        """带筛选条件时，分页拼接同样与筛选后的全量一致。"""
+        s = build_trash_fixture()
+        for filters in ({"original_parent": None},
+                        {"original_parent": "a"},
+                        {"deleted_after": 150},
+                        {"deleted_before": 300},
+                        {"deleted_after": 150, "deleted_before": 350},
+                        {"cascade_root": True},
+                        {"cascade_root": False},
+                        {"cascade_root": "a"}):
+            full = s.trash_query(**filters)["items"]
+            for page_size in (1, 2, 3):
+                self.assertEqual(page_concat(s, page_size, **filters), full,
+                                 "filters=%r page_size=%d 不一致"
+                                 % (filters, page_size))
+
+    def test_offset_limit_and_total(self):
+        s = build_trash_fixture()
+        page = s.trash_query(offset=2, limit=3)
+        self.assertEqual(page["total"], 8)  # total 是筛选后总数，不受分页影响
+        self.assertEqual([i["id"] for i in page["items"]],
+                         [i["id"] for i in s.trash_query()["items"][2:5]])
+        self.assertEqual(s.trash_query(offset=100)["items"], [])
+        self.assertEqual(s.trash_query(limit=0)["items"], [])
+        with self.assertRaises(ValueError):
+            s.trash_query(offset=-1)
+        with self.assertRaises(ValueError):
+            s.trash_query(limit=-1)
+        with self.assertRaises(ValueError):
+            list(s.trash_iter_pages(0))
+
+    def test_stable_order_across_mixed_deletes(self):
+        """分页序按删除先后（deleted_seq），与 id 字典序无关。"""
+        s = TreeStore()
+        for nid in ("z1", "m1", "a1"):
+            s.add(nid)
+        for nid in ("z1", "m1", "a1"):
+            s.delete(nid)
+        self.assertEqual([i["id"] for i in s.trash_query()["items"]],
+                         ["z1", "m1", "a1"])
+
+
+class TestTrashFilters(unittest.TestCase):
+    def test_filter_by_original_parent(self):
+        s = build_trash_fixture()
+        under_a = s.trash_query(original_parent="a")["items"]
+        self.assertEqual({i["id"] for i in under_a}, {"a1", "a2"})
+        top = s.trash_query(original_parent=None)["items"]
+        self.assertEqual({i["id"] for i in top}, {"a", "b", "d"})
+
+    def test_filter_by_deleted_time_range(self):
+        s = build_trash_fixture()
+        self.assertEqual({i["id"] for i in
+                          s.trash_query(deleted_after=200)["items"]},
+                         {"b", "c1", "d", "d1"})
+        self.assertEqual({i["id"] for i in
+                          s.trash_query(deleted_before=200)["items"]},
+                         {"a", "a1", "a2", "a1x", "b"})
+        # 闭区间端点
+        self.assertEqual({i["id"] for i in s.trash_query(
+            deleted_after=200, deleted_before=300)["items"]}, {"b", "c1"})
+        self.assertEqual(s.trash_query(deleted_after=500)["items"], [])
+
+    def test_filter_by_cascade_root(self):
+        s = build_trash_fixture()
+        roots = s.trash_query(cascade_root=True)["items"]
+        self.assertEqual({i["id"] for i in roots}, {"a", "b", "c1", "d"})
+        cascaded = s.trash_query(cascade_root=False)["items"]
+        self.assertEqual({i["id"] for i in cascaded},
+                         {"a1", "a2", "a1x", "d1"})
+        by_op = s.trash_query(cascade_root="a")["items"]
+        self.assertEqual({i["id"] for i in by_op}, {"a", "a1", "a2", "a1x"})
+
+    def test_filters_compose(self):
+        s = build_trash_fixture()
+        items = s.trash_query(original_parent=None, deleted_after=300,
+                              cascade_root=True)["items"]
+        self.assertEqual([i["id"] for i in items], ["d"])
+
+
+class TestTrashTreeExpansion(unittest.TestCase):
+    def test_trash_children_level_by_level(self):
+        s = build_trash_fixture()
+        top = [i["id"] for i in s.trash_children()]
+        self.assertEqual(top, ["a", "b", "c1", "d"])  # 回收站顶层
+        self.assertEqual([i["id"] for i in s.trash_children("a")], ["a1", "a2"])
+        self.assertEqual([i["id"] for i in s.trash_children("a1")], ["a1x"])
+        self.assertEqual(s.trash_children("a1x"), [])
+        with self.assertRaises(NotInTrashError):
+            s.trash_children("c")  # 活节点不在回收站
+        with self.assertRaises(NotFoundError):
+            s.trash_children("nope")
+
+    def test_trash_tree_nested(self):
+        s = build_trash_fixture()
+        forest = s.trash_tree()
+        self.assertEqual([t["id"] for t in forest], ["a", "b", "c1", "d"])
+        a_tree = forest[0]
+        self.assertEqual([c["id"] for c in a_tree["children"]], ["a1", "a2"])
+        self.assertEqual([c["id"] for c in a_tree["children"][0]["children"]],
+                         ["a1x"])
+        self.assertEqual(a_tree["children"][0]["children"][0]["children"], [])
+        # 指定根展开
+        d_tree = s.trash_tree("d")
+        self.assertEqual(len(d_tree), 1)
+        self.assertEqual([c["id"] for c in d_tree[0]["children"]], ["d1"])
+        with self.assertRaises(NotInTrashError):
+            s.trash_tree("c")
+
+    def test_trash_tree_deep_chain_no_recursion(self):
+        depth = 2000
+        s = TreeStore()
+        s.add("n0")
+        for i in range(1, depth):
+            s.add("n%d" % i, "n%d" % (i - 1))
+        s.delete("n0", cascade=True)
+        tree = s.trash_tree("n0")
+        node, count = tree[0], 1
+        while node["children"]:
+            node = node["children"][0]
+            count += 1
+        self.assertEqual(count, depth)
+
+
+class TestBatchRestore(unittest.TestCase):
+    def test_batch_restore_matches_sequential(self):
+        """核心一致性：批量恢复与逐个恢复的最终结构完全一致。"""
+        ids = ["a1x", "a1", "a2", "a", "c1", "d1", "d", "b"]
+        s1 = build_trash_fixture()
+        result = s1.restore_many(ids)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.succeeded, ids)
+
+        s2 = build_trash_fixture()
+        for nid in ids:
+            s2.restore(nid)
+        self.assertEqual(s1.snapshot(), s2.snapshot())
+        self.assertEqual(s1.list_live(), s2.list_live())
+        self.assertTrue(s1.check_invariants())
+
+    def test_batch_restore_subtree_matches_sequential(self):
+        s1 = build_trash_fixture()
+        s1.restore_many(["a", "d"], subtree=True)
+        s2 = build_trash_fixture()
+        s2.restore("a", subtree=True)
+        s2.restore("d", subtree=True)
+        self.assertEqual(s1.snapshot(), s2.snapshot())
+
+    def test_batch_restore_partial_failure_details_and_rollback(self):
+        """中途失败：保留中间状态、给出失败明细，可回滚到批量前。"""
+        s = build_trash_fixture()
+        s.purge("d1")  # 让 d1 彻底不存在，恢复它必然失败
+        before = s.snapshot()
+        result = s.restore_many(["a1x", "a1", "d1", "a2"])
+        self.assertFalse(result.ok)
+        self.assertEqual(result.succeeded, ["a1x", "a1"])  # 中间状态保留
+        self.assertEqual(len(result.failed), 1)
+        self.assertEqual(result.failed[0]["id"], "d1")
+        self.assertEqual(result.failed[0]["error"], "NotFoundError")
+        self.assertIn("d1", result.failed[0]["message"])
+        self.assertEqual(result.pending, ["a2"])
+        # 中间状态：a1x/a1 已恢复，a2 仍在回收站
+        self.assertTrue(s.exists("a1"))
+        self.assertTrue(s.in_trash("a2"))
+        # 回滚后与批量操作前完全一致
+        result.rollback()
+        self.assertTrue(result.rolled_back)
+        self.assertEqual(s.snapshot(), before)
+        self.assertTrue(s.in_trash("a1x"))
+        self.assertTrue(s.check_invariants())
+        with self.assertRaises(StoreError):
+            result.rollback()  # 不能重复回滚
+
+    def test_batch_restore_atomic_auto_rollback(self):
+        s = build_trash_fixture()
+        before = s.snapshot()
+        result = s.restore_many(["a1x", "nope", "a1"], atomic=True)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.rolled_back)
+        self.assertEqual(result.pending, ["a1"])
+        self.assertEqual(s.snapshot(), before)  # 已自动回滚
+
+    def test_batch_restore_continue_on_error(self):
+        s = build_trash_fixture()
+        result = s.restore_many(["a1x", "nope", "a1"],
+                                continue_on_error=True)
+        self.assertEqual(result.succeeded, ["a1x", "a1"])
+        self.assertEqual([f["id"] for f in result.failed], ["nope"])
+        self.assertEqual(result.pending, [])
+
+    def test_batch_restore_reject_policy_atomic_per_item(self):
+        """单项 REJECT 失败不污染状态，批量结果记录该失败。"""
+        s = TreeStore()
+        s.add("a")
+        s.add("b", "a")
+        s.delete("a", cascade=True)
+        before = s.snapshot()
+        result = s.restore_many(["b"], policy=REJECT)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failed[0]["error"], "ParentMissingError")
+        self.assertEqual(s.snapshot(), before)
+
+
+class TestBatchPurge(unittest.TestCase):
+    def test_batch_purge_matches_sequential(self):
+        s1 = build_trash_fixture()
+        result = s1.purge_many(["c1", "b", "a"])  # a 级联清除整棵
+        self.assertTrue(result.ok)
+        s2 = build_trash_fixture()
+        for nid in ("c1", "b", "a"):
+            s2.purge(nid)
+        self.assertEqual(s1.snapshot(), s2.snapshot())
+        self.assertEqual([t["id"] for t in s1.trash()], ["d", "d1"])
+        self.assertTrue(s1.check_invariants())
+
+    def test_batch_purge_failure_details_and_rollback(self):
+        """purge 是物理删除，但批量回滚基于检查点，可完整还原。"""
+        s = build_trash_fixture()
+        before = s.snapshot()
+        result = s.purge_many(["c1", "ghost", "b"])
+        self.assertFalse(result.ok)
+        self.assertEqual(result.succeeded, ["c1"])
+        self.assertEqual(result.failed[0]["id"], "ghost")
+        self.assertEqual(result.failed[0]["error"], "NotFoundError")
+        self.assertEqual(result.pending, ["b"])
+        self.assertFalse(s.in_trash("c1"))  # 中间状态：c1 已被清除
+        result.rollback()
+        self.assertEqual(s.snapshot(), before)  # c1 完整还原
+        self.assertTrue(s.in_trash("c1"))
+        self.assertTrue(s.check_invariants())
+
+    def test_batch_purge_atomic(self):
+        s = build_trash_fixture()
+        before = s.snapshot()
+        result = s.purge_many(["c1", "b", "ghost"], atomic=True)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.rolled_back)
+        self.assertEqual(s.snapshot(), before)
+
+    def test_batch_purge_live_node_rejected(self):
+        s = build_trash_fixture()
+        result = s.purge_many(["c"])  # 活节点不在回收站
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failed[0]["error"], "NotInTrashError")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

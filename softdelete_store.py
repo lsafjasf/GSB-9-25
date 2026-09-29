@@ -22,9 +22,23 @@
 - purge 未删除节点     -> NotInTrashError
 - purge(cascade=False) 只清除自身，其子节点重新挂到根；已删除子节点的
   原父信息仍保留，恢复时按上述三种策略处理。
+
+回收站增强
+----------
+- 每个已删除节点记录删除元数据：deleted_at（删除时间，时钟可注入）、
+  deleted_seq（全局单调删除序号，保证分页有稳定全序）、
+  deleted_root（本次删除操作的目标节点，即级联根）；
+- trash_query(...) 支持按原父节点、删除时间区间、是否/哪个级联根筛选，
+  以及 offset/limit 分页；同一筛选条件下各页拼接与全量列表一致；
+- trash_children / trash_tree 支持按层级展开已删除子树；
+- restore_many / purge_many 批量操作：中途失败时返回 BatchResult，
+  含成功/失败明细与未处理列表，并可通过 result.rollback() 把存储
+  回滚到批量操作开始前的状态（atomic=True 时自动回滚）。
 """
 
 from __future__ import annotations
+
+import time
 
 # 恢复策略常量
 ROOT = "root"
@@ -67,7 +81,8 @@ class DeleteFailedError(StoreError):
 
 class _Node:
     __slots__ = ("id", "parent_id", "attrs", "deleted",
-                 "deleted_parent", "deleted_ancestors")
+                 "deleted_parent", "deleted_ancestors",
+                 "deleted_at", "deleted_seq", "deleted_root")
 
     def __init__(self, node_id, parent_id, attrs):
         self.id = node_id
@@ -76,15 +91,61 @@ class _Node:
         self.deleted = False
         self.deleted_parent = None          # 删除时的原父节点（回收站视图用）
         self.deleted_ancestors = None       # 删除时的祖先链（父->...->根）
+        self.deleted_at = None              # 删除时间戳（时钟可注入）
+        self.deleted_seq = None             # 全局单调删除序号（分页稳定序）
+        self.deleted_root = None            # 本次删除操作的目标节点（级联根）
+
+
+# trash_query 的 original_parent 缺省哨兵（None 本身是合法筛选值：根层删除）
+_ANY = object()
+
+
+class BatchResult:
+    """批量操作结果：成功/失败明细 + 可回滚的中间状态。
+
+    - succeeded: 已成功处理的节点 id（按处理顺序）
+    - failed:    失败明细 [{"id", "error", "message"}]
+    - pending:   因中途失败而未处理的节点 id
+    - rollback(): 把存储回滚到批量操作开始前的状态，只能调用一次
+    """
+
+    def __init__(self, store, checkpoint, op):
+        self.op = op
+        self.succeeded = []
+        self.failed = []
+        self.pending = []
+        self.rolled_back = False
+        self._store = store
+        self._checkpoint = checkpoint
+
+    @property
+    def ok(self):
+        return not self.failed
+
+    def rollback(self):
+        """回滚到批量操作开始前的状态（含已被 purge 的节点）。"""
+        if self._checkpoint is None:
+            raise StoreError("该批量结果已回滚，不能重复回滚")
+        self._store._restore_checkpoint(self._checkpoint)
+        self._checkpoint = None
+        self.rolled_back = True
+        return True
+
+    def summary(self):
+        return ("%s: ok=%d failed=%d pending=%d rolled_back=%s"
+                % (self.op, len(self.succeeded), len(self.failed),
+                   len(self.pending), self.rolled_back))
 
 
 class TreeStore:
     """带软删除、回收站与按属性索引的树形存储。"""
 
-    def __init__(self):
+    def __init__(self, clock=None):
         self._nodes = {}      # id -> _Node（含已删除节点）
         self._children = {}   # parent_id(None 表示根) -> set(child_id)，含已删除节点
         self._index = {}      # attr -> value -> set(live_id)，只索引未删除节点
+        self._clock = clock or time.time  # 删除时间戳来源，测试可注入假时钟
+        self._seq = 0         # 全局删除序号，保证回收站分页有稳定全序
 
     # ------------------------------------------------------------------ #
     # 写入
@@ -137,7 +198,7 @@ class TreeStore:
         try:
             for tid in targets:
                 target = self._nodes[tid]
-                self._apply_delete(target)
+                self._apply_delete(target, root_id=node_id)
                 done.append(target)
                 if hook is not None:
                     hook(tid)
@@ -205,6 +266,61 @@ class TreeStore:
         return len(targets)
 
     # ------------------------------------------------------------------ #
+    # 批量操作（失败可回滚）
+    # ------------------------------------------------------------------ #
+    def restore_many(self, ids, policy=NEAREST_ANCESTOR, subtree=False,
+                     atomic=False, continue_on_error=False):
+        """按给定顺序逐个恢复。语义与手动逐个调用 restore 完全一致。
+
+        中途失败：默认停止并返回 BatchResult（含失败明细与 pending 列表），
+        已成功的部分保留为中间状态，可调用 result.rollback() 整体回滚；
+        atomic=True 时失败即自动回滚；continue_on_error=True 时跳过失败继续。
+        """
+        checkpoint = self._checkpoint()
+        result = BatchResult(self, checkpoint, "restore_many")
+        ids = list(ids)
+        for pos, nid in enumerate(ids):
+            try:
+                self.restore(nid, policy=policy, subtree=subtree)
+                result.succeeded.append(nid)
+            except StoreError as exc:
+                result.failed.append({
+                    "id": nid, "error": type(exc).__name__,
+                    "message": str(exc)})
+                if atomic:
+                    result.pending = ids[pos + 1:]
+                    result.rollback()
+                    break
+                if not continue_on_error:
+                    result.pending = ids[pos + 1:]
+                    break
+        return result
+
+    def purge_many(self, ids, cascade=True,
+                   atomic=False, continue_on_error=False):
+        """按给定顺序逐个彻底清除。失败处理与 restore_many 相同；
+        回滚基于操作前检查点，因此被 purge 的节点也能完整还原。"""
+        checkpoint = self._checkpoint()
+        result = BatchResult(self, checkpoint, "purge_many")
+        ids = list(ids)
+        for pos, nid in enumerate(ids):
+            try:
+                self.purge(nid, cascade=cascade)
+                result.succeeded.append(nid)
+            except StoreError as exc:
+                result.failed.append({
+                    "id": nid, "error": type(exc).__name__,
+                    "message": str(exc)})
+                if atomic:
+                    result.pending = ids[pos + 1:]
+                    result.rollback()
+                    break
+                if not continue_on_error:
+                    result.pending = ids[pos + 1:]
+                    break
+        return result
+
+    # ------------------------------------------------------------------ #
     # 普通查询（只见未删除项）
     # ------------------------------------------------------------------ #
     def exists(self, node_id):
@@ -241,8 +357,7 @@ class TreeStore:
     # ------------------------------------------------------------------ #
     def trash(self):
         """全部已删除项：[{"id", "original_parent", "attrs"}]，按 id 排序。"""
-        return [{"id": n.id, "original_parent": n.deleted_parent,
-                 "attrs": dict(n.attrs)}
+        return [self._trash_item(n)
                 for n in sorted(self._nodes.values(), key=lambda n: repr(n.id))
                 if n.deleted]
 
@@ -258,13 +373,123 @@ class TreeStore:
         return node is not None and node.deleted
 
     # ------------------------------------------------------------------ #
+    # 回收站：筛选 + 分页 + 层级展开
+    # ------------------------------------------------------------------ #
+    def trash_query(self, original_parent=_ANY, deleted_after=None,
+                    deleted_before=None, cascade_root=None,
+                    offset=0, limit=None):
+        """筛选 + 分页查询回收站。
+
+        筛选条件（可组合）：
+        - original_parent: 原父节点 id；None 表示只查根层删除，缺省不过滤
+        - deleted_after / deleted_before: 删除时间区间，两端闭区间
+        - cascade_root: True 只看删除操作的目标节点（级联根），
+          False 只看被级联带出的节点，传入具体 id 则只看该次删除操作的节点，
+          None 不过滤
+        分页：offset / limit；结果按 deleted_seq（删除先后顺序）稳定排序，
+        因此同一筛选条件下各页按序拼接与全量列表完全一致。
+        返回 {"total", "offset", "limit", "items"}。
+        """
+        if offset < 0:
+            raise ValueError("offset 不能为负: %r" % (offset,))
+        if limit is not None and limit < 0:
+            raise ValueError("limit 不能为负: %r" % (limit,))
+        items = []
+        for node in self._nodes.values():
+            if not node.deleted:
+                continue
+            if original_parent is not _ANY \
+                    and node.deleted_parent != original_parent:
+                continue
+            if deleted_after is not None and node.deleted_at < deleted_after:
+                continue
+            if deleted_before is not None and node.deleted_at > deleted_before:
+                continue
+            if cascade_root is True and node.deleted_root != node.id:
+                continue
+            if cascade_root is False and node.deleted_root == node.id:
+                continue
+            if cascade_root not in (None, True, False) \
+                    and node.deleted_root != cascade_root:
+                continue
+            items.append(self._trash_item(node))
+        items.sort(key=lambda item: item["deleted_seq"])
+        total = len(items)
+        end = None if limit is None else offset + limit
+        return {"total": total, "offset": offset, "limit": limit,
+                "items": items[offset:end]}
+
+    def trash_iter_pages(self, page_size, **filters):
+        """按页迭代 trash_query 结果，供"分页拉取再拼接"的调用方使用。"""
+        if page_size <= 0:
+            raise ValueError("page_size 必须为正: %r" % (page_size,))
+        offset = 0
+        while True:
+            page = self.trash_query(offset=offset, limit=page_size, **filters)
+            if not page["items"]:
+                break
+            yield page
+            offset += page_size
+
+    def trash_children(self, node_id=None):
+        """按层级展开：返回某已删除节点的已删除子节点（回收站条目格式）。
+        node_id=None 时返回回收站顶层项（等价于 trash_roots 的条目形式）。
+        """
+        if node_id is None:
+            ids = self.trash_roots()
+        else:
+            node = self._nodes.get(node_id)
+            if node is None:
+                raise NotFoundError("节点不存在: %r" % (node_id,))
+            if not node.deleted:
+                raise NotInTrashError("节点未删除，不在回收站: %r" % (node_id,))
+            ids = [c for c in self._children.get(node_id, ())
+                   if self._nodes[c].deleted]
+        items = [self._trash_item(self._nodes[i]) for i in ids]
+        items.sort(key=lambda item: item["deleted_seq"])
+        return items
+
+    def trash_tree(self, root_id=None):
+        """整棵展开已删除子树（迭代实现，深树不溢出）。
+        root_id=None 时以回收站全部顶层项为根展开成森林。
+        返回 [{"id", "original_parent", "deleted_at", "cascade_root",
+               "attrs", "children": [...]}]。
+        """
+        if root_id is None:
+            roots = self.trash_roots()
+        else:
+            node = self._nodes.get(root_id)
+            if node is None:
+                raise NotFoundError("节点不存在: %r" % (root_id,))
+            if not node.deleted:
+                raise NotInTrashError("节点未删除，不在回收站: %r" % (root_id,))
+            roots = [root_id]
+        return [self._build_trash_tree(rid) for rid in roots]
+
+    def _build_trash_tree(self, root_id):
+        root_item = self._tree_item(root_id)
+        stack = [root_item]
+        while stack:
+            item = stack.pop()
+            deleted_kids = sorted(
+                (c for c in self._children.get(item["id"], ())
+                 if self._nodes[c].deleted), key=repr)
+            for child_id in deleted_kids:
+                child_item = self._tree_item(child_id)
+                item["children"].append(child_item)
+                stack.append(child_item)
+        return root_item
+
+    # ------------------------------------------------------------------ #
     # 一致性断言 / 快照
     # ------------------------------------------------------------------ #
     def snapshot(self):
         """全量规范化快照（节点父子关系、删除标记、属性、索引），
         可直接用 == 对比"恢复后是否与删除前一致"。"""
         return {
-            "nodes": {nid: (n.parent_id, n.deleted, frozenset(n.attrs.items()))
+            "nodes": {nid: (n.parent_id, n.deleted, frozenset(n.attrs.items()),
+                            n.deleted_parent, n.deleted_at, n.deleted_seq,
+                            n.deleted_root)
                       for nid, n in self._nodes.items()},
             "index": {a: {v: frozenset(ids) for v, ids in vals.items()}
                       for a, vals in self._index.items()},
@@ -279,9 +504,18 @@ class TreeStore:
             if node.deleted:
                 assert node.deleted_ancestors is not None, \
                     "已删除节点缺少祖先链: %r" % (nid,)
+                assert node.deleted_at is not None \
+                    and node.deleted_seq is not None \
+                    and node.deleted_root is not None, \
+                    "已删除节点缺少删除元数据: %r" % (nid,)
             else:
                 assert node.deleted_parent is None, \
                     "活节点残留删除痕迹: %r" % (nid,)
+                assert node.deleted_at is None and node.deleted_seq is None \
+                    and node.deleted_root is None, \
+                    "活节点残留删除元数据: %r" % (nid,)
+        seqs = [n.deleted_seq for n in self._nodes.values() if n.deleted]
+        assert len(seqs) == len(set(seqs)), "删除序号不唯一"
         # children 表与 parent_id 完全一致
         rebuilt = {}
         for nid, node in self._nodes.items():
@@ -308,13 +542,15 @@ class TreeStore:
         return node
 
     def _subtree_ids(self, node_id):
-        """迭代先序遍历（父先于子），避免深树递归溢出。"""
+        """迭代先序遍历（父先于子，子节点按 id 排序），避免深树递归溢出；
+        顺序确定，保证删除序号与回收站分页序可复现。"""
         order = []
         stack = [node_id]
         while stack:
             current = stack.pop()
             order.append(current)
-            stack.extend(self._children.get(current, ()))
+            stack.extend(sorted(self._children.get(current, ()),
+                                key=repr, reverse=True))
         return order
 
     def _ancestor_chain(self, parent_id):
@@ -325,16 +561,23 @@ class TreeStore:
             current = self._nodes[current].parent_id
         return tuple(chain)
 
-    def _apply_delete(self, node):
+    def _apply_delete(self, node, root_id):
         node.deleted = True
         node.deleted_parent = node.parent_id
         node.deleted_ancestors = self._ancestor_chain(node.parent_id)
+        node.deleted_at = self._clock()
+        node.deleted_seq = self._seq
+        node.deleted_root = root_id
+        self._seq += 1
         self._index_remove(node)
 
     def _undo_delete(self, node):
         node.deleted = False
         node.deleted_parent = None
         node.deleted_ancestors = None
+        node.deleted_at = None
+        node.deleted_seq = None
+        node.deleted_root = None
         self._index_add(node)
 
     def _resolve_parent(self, node, policy, batch=frozenset()):
@@ -369,7 +612,64 @@ class TreeStore:
         node.deleted = False
         node.deleted_parent = None
         node.deleted_ancestors = None
+        node.deleted_at = None
+        node.deleted_seq = None
+        node.deleted_root = None
         self._index_add(node)
+
+    # ------------------------------------------------------------------ #
+    # 检查点 / 回滚（批量操作与级联删除失败回滚的基础）
+    # ------------------------------------------------------------------ #
+    def _checkpoint(self):
+        """全量状态检查点：节点字段、children 表、索引、删除序号。"""
+        nodes_state = {
+            nid: (n.parent_id, dict(n.attrs), n.deleted, n.deleted_parent,
+                  n.deleted_ancestors, n.deleted_at, n.deleted_seq,
+                  n.deleted_root)
+            for nid, n in self._nodes.items()}
+        children = {k: set(v) for k, v in self._children.items()}
+        index = {a: {v: set(ids) for v, ids in vals.items()}
+                 for a, vals in self._index.items()}
+        return (nodes_state, children, index, self._seq)
+
+    def _restore_checkpoint(self, checkpoint):
+        """回滚到检查点：被 purge 的节点完整还原，多余的节点移除。"""
+        nodes_state, children, index, seq = checkpoint
+        for nid in list(self._nodes):
+            if nid not in nodes_state:
+                del self._nodes[nid]
+        for nid, state in nodes_state.items():
+            node = self._nodes.get(nid)
+            if node is None:
+                node = _Node(nid, state[0], state[1])
+                self._nodes[nid] = node
+            (node.parent_id, node.attrs, node.deleted, node.deleted_parent,
+             node.deleted_ancestors, node.deleted_at, node.deleted_seq,
+             node.deleted_root) = (
+                state[0], dict(state[1]), state[2], state[3],
+                state[4], state[5], state[6], state[7])
+        self._children = {k: set(v) for k, v in children.items()}
+        self._index = {a: {v: set(ids) for v, ids in vals.items()}
+                       for a, vals in index.items()}
+        self._seq = seq
+
+    def _trash_item(self, node):
+        return {"id": node.id,
+                "original_parent": node.deleted_parent,
+                "deleted_at": node.deleted_at,
+                "deleted_seq": node.deleted_seq,
+                "cascade_root": node.deleted_root,
+                "is_cascade_root": node.deleted_root == node.id,
+                "attrs": dict(node.attrs)}
+
+    def _tree_item(self, node_id):
+        node = self._nodes[node_id]
+        return {"id": node.id,
+                "original_parent": node.deleted_parent,
+                "deleted_at": node.deleted_at,
+                "cascade_root": node.deleted_root,
+                "attrs": dict(node.attrs),
+                "children": []}
 
     def _purge_one(self, node):
         siblings = self._children.get(node.parent_id)
