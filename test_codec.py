@@ -182,6 +182,19 @@ class TestModeSelection(unittest.TestCase):
         self.assertIn("raw", res.reason)
         self.assertEqual(set(res.sizes), {"raw", "delta", "rle", "delta_rle"})
 
+    def test_report_sizes_match_actual_encoding(self):
+        # 报告里的四个字节数必须等于逐模式真实编码产出的长度，
+        # 防止 sizes 退化成估算后与真实序列化结果分叉。
+        for name, seq in make_samples().items():
+            res = codec.encode_with_report(seq)
+            for mode in Mode:
+                with self.subTest(sample=name, mode=mode.name):
+                    self.assertEqual(res.sizes[mode.name.lower()],
+                                     len(codec.encode(seq, mode)))
+            with self.subTest(sample=name, mode="chosen"):
+                self.assertEqual(res.size, len(res.data))
+                self.assertEqual(res.sizes[res.mode.name.lower()], res.size)
+
 
 class TestRobustness(unittest.TestCase):
     def test_truncated_raises(self):

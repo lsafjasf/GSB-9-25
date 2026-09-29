@@ -11,7 +11,7 @@
 ## 运行命令
 
 ```bash
-python3 test_codec.py -v   # 16 个测试：对拍、边界、鲁棒性、百万级
+python3 test_codec.py -v   # 17 个测试：对拍、边界、报告字节数核对、鲁棒性、百万级
 python3 bench.py           # 分布敏感性数据 + 百万级耗时
 ```
 
