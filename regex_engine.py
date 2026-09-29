@@ -7,17 +7,70 @@
 
 支持语法（与 Python re 的子集语义对齐，re.search 语义）：
   字面字符、. （除 \\n 外任意字符）、[...] 与 [^...]（含区间、转义类）、
-  量词 * + ?、转义（\\d \\D \\w \\W \\s \\S 及标点转义）、锚点 ^ $。
+  量词 * + ?、转义（\\d \\D \\w \\W \\s \\S、控制字符转义 \\a \\f \\n \\r \\t \\v
+  及标点转义）、锚点 ^ $。
+  \\d \\w \\s 与 re 一致按 Unicode 语义：\\d = 类别 Nd，\\w = 字母数字或 '_'，
+  \\s = 空白（str.isspace）；大写形式为其补集。
   $ 与 re 一致：匹配串尾或结尾换行符之前的位置。
 
 语法错误抛出 RegexSyntaxError，携带位置与原因，绝不静默按字面量处理。
 """
+import unicodedata
 
 MAXCHAR = 0x10FFFF
 
-_DIGIT_RANGES = ((0x30, 0x39),)
-_WORD_RANGES = ((0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A))
-_SPACE_RANGES = ((0x09, 0x0D), (0x20, 0x20))
+# 控制字符转义（与 re 一致）：\a \f \n \r \t \v
+_CONTROL_ESCAPES = {
+    "a": "\a",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+}
+
+_CLASS_ESCAPE_LETTERS = frozenset("dDwWsS")
+
+_uni_ranges = None
+
+
+def _build_uni_ranges():
+    r"""一次扫描 Unicode 空间，构建 \d \w \s 的区间表（与 re 的 str 语义一致）。
+
+    \d = 十进制数字（unicodedata 类别 Nd）
+    \w = 字母数字（str.isalnum）或 '_'
+    \s = 空白（str.isspace）
+    """
+    category = unicodedata.category
+    tables = {"d": [], "w": [], "s": []}
+    starts = {"d": -1, "w": -1, "s": -1}
+    for cp in range(MAXCHAR + 1):
+        ch = chr(cp)
+        flags = (
+            ("d", category(ch) == "Nd"),
+            ("w", ch == "_" or ch.isalnum()),
+            ("s", ch.isspace()),
+        )
+        for key, on in flags:
+            if on:
+                if starts[key] < 0:
+                    starts[key] = cp
+            elif starts[key] >= 0:
+                tables[key].append((starts[key], cp - 1))
+                starts[key] = -1
+    for key, start in starts.items():
+        if start >= 0:
+            tables[key].append((start, MAXCHAR))
+    return {key: tuple(ranges) for key, ranges in tables.items()}
+
+
+def _class_escape_ranges(e):
+    r"""返回 \d \D \w \W \s \S 的区间表（惰性构建并缓存，大写为补集）。"""
+    global _uni_ranges
+    if _uni_ranges is None:
+        _uni_ranges = _build_uni_ranges()
+    ranges = _uni_ranges[e.lower()]
+    return _complement(ranges) if e.isupper() else ranges
 
 
 def _complement(ranges):
@@ -30,16 +83,6 @@ def _complement(ranges):
     if prev <= MAXCHAR:
         out.append((prev, MAXCHAR))
     return tuple(out)
-
-
-_CLASS_ESCAPES = {
-    "d": _DIGIT_RANGES,
-    "w": _WORD_RANGES,
-    "s": _SPACE_RANGES,
-    "D": _complement(_DIGIT_RANGES),
-    "W": _complement(_WORD_RANGES),
-    "S": _complement(_SPACE_RANGES),
-}
 
 
 class RegexSyntaxError(Exception):
@@ -156,8 +199,10 @@ class _Parser:
             self.error(pos, "悬空转义 (bad escape: 模式以 \\ 结尾)")
         e = self.p[self.i]
         self.i += 1
-        if e in _CLASS_ESCAPES:
-            return Class(_CLASS_ESCAPES[e], False)
+        if e in _CLASS_ESCAPE_LETTERS:
+            return Class(_class_escape_ranges(e), False)
+        if e in _CONTROL_ESCAPES:
+            return Lit(_CONTROL_ESCAPES[e])
         if e.isascii() and e.isalnum():
             self.error(pos, "未知转义 (bad escape \\%s)" % e)
         return Lit(e)
@@ -219,8 +264,13 @@ class _Parser:
                 self.error(pos, "悬空转义 (bad escape: 字符类内以 \\ 结尾)")
             e = self.p[self.i]
             self.i += 1
-            if e in _CLASS_ESCAPES:
-                return list(_CLASS_ESCAPES[e]), False
+            if e in _CLASS_ESCAPE_LETTERS:
+                return list(_class_escape_ranges(e)), False
+            if e == "b":
+                return [(0x08, 0x08)], True  # 类内 \b 为退格符（与 re 一致）
+            if e in _CONTROL_ESCAPES:
+                ch = _CONTROL_ESCAPES[e]
+                return [(ord(ch), ord(ch))], True
             if e.isascii() and e.isalnum():
                 self.error(pos, "未知转义 (bad escape \\%s)" % e)
             return [(ord(e), ord(e))], True

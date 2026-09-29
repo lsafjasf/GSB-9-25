@@ -115,6 +115,34 @@ class TestEscape(unittest.TestCase):
             search("a\\e", "ae")
         self.assertIn("未知转义", ctx.exception.reason)
 
+    def test_control_escapes(self):
+        self.assertEqual(search("a\\nb", "a\nb"), (0, 3))
+        self.assertEqual(search("a\\tb", "a\tb"), (0, 3))
+        self.assertEqual(search("\\r\\f\\v\\a", "\r\f\v\a"), (0, 4))
+        self.assertIsNone(search("\\n", "n"))  # 转义不等于字母本身
+
+    def test_control_escapes_in_class(self):
+        self.assertEqual(search("[\\n\\t]+", "a\n\tb"), (1, 3))
+        self.assertEqual(search("[^\\n]", "\nx"), (1, 2))
+        self.assertEqual(search("[\\b]", "\x08"), (0, 1))  # 类内 \b 为退格符
+
+    def test_unicode_classes(self):
+        # \d \w \s 与 re 一致按 Unicode 语义
+        self.assertEqual(search("\\d+", "a٣٥b"), (1, 3))      # 阿拉伯-印度数字
+        self.assertEqual(search("\\d", "４"), (0, 1))          # 全角数字
+        self.assertIsNone(search("\\d", "²"))                  # No 类别不是 \d
+        self.assertEqual(search("\\w+", " 中_é1 "), (1, 5))
+        self.assertEqual(search("\\s", "a\xa0b"), (1, 2))      # 不换行空格
+        self.assertEqual(search("\\s", "a\u3000b"), (1, 2))    # 全角空格
+
+    def test_unicode_classes_negated(self):
+        self.assertIsNone(search("\\D+", "٣٣"))                # 修复前误匹配
+        self.assertIsNone(search("[^\\d]", "٣"))               # 修复前误匹配
+        self.assertIsNone(search("\\W", "中"))
+        self.assertIsNone(search("\\S", "\xa0"))
+        self.assertEqual(search("\\D+", "٣ab٣"), (1, 3))
+        self.assertEqual(search("[^\\w]+", "中!é"), (1, 2))
+
 
 class TestAnchor(unittest.TestCase):
     def test_start(self):

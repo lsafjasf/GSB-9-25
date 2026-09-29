@@ -20,9 +20,19 @@ import regex_engine as E
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # 生成器只产生双方语义一致的语法子集：字面/转义、.、字符类、* + ?、^ $。
-LIT_CHARS = list("abcx01_ ") + list(".*+?[]^$\\-")
-CLASS_ITEMS = ["a", "b", "c", "0", "1", " ", ".", "a-c", "0-9", "x", "\\d", "\\w", "]", "-", "^"]
-INPUT_ALPHABET = list("abc01 ._\n")
+# 覆盖非 ASCII（汉字、阿拉伯数字、全角/不换行空白等）与控制字符转义，
+# 保证 \d \w \s 的 Unicode 语义及其取反、\n \t 等转义都能被随机用例命中。
+LIT_CHARS = list("abcx01_ ") + list(".*+?[]^$\\-") + list("中é٣²")
+CONTROL_ESCAPES = ["\\a", "\\f", "\\n", "\\r", "\\t", "\\v"]
+# 注意：不包含 \b——它在类内是退格符、类外是 re 的单词边界断言（子集外），
+# 非法模式变异把类内转义暴露到类外时会造成"re 接受、引擎报错"的假不一致；
+# [\b] 的语义由 test_regex.py 单测覆盖。
+CLASS_ITEMS = ["a", "b", "c", "0", "1", " ", ".", "a-c", "0-9", "x",
+               "\\d", "\\w", "\\s", "\\D", "\\W", "\\S",
+               "中", "é", "٣", "一-鿿", "À-ÿ", "٠-٩",
+               "\\n", "\\t", "\\r", "]", "-", "^"]
+INPUT_ALPHABET = list("abc01 ._\n\t") + ["中", "é", "٣", "۵", "²",
+                                         "\xa0", "\u3000", "\x1c", "\x0b"]
 
 
 def escape_lit(c):
@@ -47,9 +57,11 @@ def gen_class(rng):
 
 def gen_atom(rng):
     r = rng.random()
-    if r < 0.45:
+    if r < 0.40:
         tok = escape_lit(rng.choice(LIT_CHARS))
-    elif r < 0.60:
+    elif r < 0.50:
+        tok = rng.choice(CONTROL_ESCAPES)
+    elif r < 0.62:
         tok = "."
     elif r < 0.85:
         tok = gen_class(rng)
@@ -159,15 +171,17 @@ def fuzz_invalid(rng, n):
     mutants = 0
     for _ in range(n):
         tokens = gen_tokens(rng)
-        kind = rng.randrange(4)
+        kind = rng.randrange(5)
         if kind == 0:
             tokens.insert(rng.randrange(len(tokens) + 1), "[")  # 可能未闭合
         elif kind == 1:
             tokens.append("\\")  # 悬空转义
         elif kind == 2:
             tokens.insert(0, rng.choice("*+?"))  # 量词缺少操作数
-        else:
+        elif kind == 3:
             tokens.insert(rng.randrange(len(tokens) + 1), "[z-a]")  # 区间反序
+        else:
+            tokens.append("\\e")  # 未知转义
         pattern = "".join(tokens)
         mine, ref = engine_result(pattern, "ab"), ref_result(pattern, "ab")
         if (mine == "ERR") != (ref == "ERR"):
