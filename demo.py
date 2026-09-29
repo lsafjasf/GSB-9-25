@@ -1,4 +1,5 @@
-"""Demo: prints a full execution trace and a performance benchmark.
+"""Demo: prints an explainable execution trace, a replay check, and a
+performance benchmark.
 
 Run: python3 demo.py
 """
@@ -6,7 +7,7 @@ Run: python3 demo.py
 import json
 import time
 
-from rule_engine import ConflictError, Rule, RuleEngine
+from rule_engine import ConflictError, Rule, RuleEngine, format_trace
 
 
 def sample_trace():
@@ -32,11 +33,18 @@ def sample_trace():
     result = engine.run(facts)
     print("=== facts ===")
     print(json.dumps(facts, ensure_ascii=False))
-    print("\n=== trace (strategy=priority) ===")
-    print(json.dumps(result.trace, indent=2, ensure_ascii=False))
-    print("\n=== final state ===")
-    print(json.dumps(result.state, ensure_ascii=False),
-          "flags:", sorted(result.flags))
+    print("\n=== explainable trace (strategy=priority) ===")
+    print("\n".join(format_trace(result.trace)))
+
+    print("\n=== replay check ===")
+    engine.replay(facts, result.trace)
+    print("replay OK: same facts + same rules reproduce the trace exactly")
+    tampered = json.loads(json.dumps(result.trace))
+    tampered["final_state"]["discount"] = 0.99
+    try:
+        engine.replay(facts, tampered)
+    except Exception as exc:
+        print("tampered trace rejected:", exc)
 
     reject_engine = RuleEngine(conflict_strategy="reject")
     reject_engine.add_rule(Rule(

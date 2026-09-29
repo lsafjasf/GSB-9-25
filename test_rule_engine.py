@@ -5,10 +5,14 @@ import time
 import unittest
 
 from rule_engine import (
+    ConditionError,
     ConflictError,
+    FieldMissingError,
+    ReplayMismatchError,
     Rule,
     RuleEngine,
     evaluate_condition,
+    format_trace,
 )
 
 
@@ -253,6 +257,203 @@ class TestPerformance(unittest.TestCase):
                  len(result.trace["actions"])))
         self.assertLess(elapsed, 2.0)
         self.assertGreater(len(result.trace["matched"]), 0)
+
+
+class TestExplainableConditionTree(unittest.TestCase):
+    def test_per_item_results_for_nested_condition(self):
+        engine = make_engine()
+        engine.add_rule(Rule(
+            "vip",
+            {"and": [
+                {"field": "tier", "op": "in", "value": ["gold", "platinum"]},
+                {"or": [{"field": "age", "op": ">=", "value": 18},
+                        {"field": "guardian", "op": "==", "value": True}]},
+                {"not": {"field": "banned", "op": "==", "value": True}},
+            ]},
+            [{"flag": "vip"}]))
+        facts = {"tier": "gold", "age": 20, "guardian": False, "banned": False}
+        entry = engine.run(facts).trace["evaluations"][0]
+        self.assertEqual(entry["result"], "matched")
+        root = entry["condition"]
+        self.assertEqual(root["type"], "and")
+        self.assertIs(root["result"], True)
+        leaf = root["children"][0]
+        self.assertEqual(leaf["type"], "cmp")
+        self.assertEqual(leaf["field"], "tier")
+        self.assertEqual(leaf["actual"], "gold")
+        self.assertIs(leaf["result"], True)
+        or_node = root["children"][1]
+        self.assertEqual(or_node["type"], "or")
+        self.assertIs(or_node["result"], True)
+        # "or" short-circuits after age >= 18 is True: guardian unevaluated.
+        self.assertIs(or_node["children"][0]["result"], True)
+        guardian = or_node["children"][1]
+        self.assertEqual(guardian["type"], "unevaluated")
+        self.assertEqual(guardian["reason"], "short_circuit")
+        not_node = root["children"][2]
+        self.assertEqual(not_node["type"], "not")
+        self.assertIs(not_node["result"], True)
+        self.assertIs(not_node["child"]["result"], False)
+
+    def test_and_short_circuits_on_first_false(self):
+        engine = make_engine()
+        engine.add_rule(Rule(
+            "r",
+            {"and": [{"field": "a", "op": "==", "value": 1},
+                     {"field": "b", "op": "==", "value": 2}]},
+            [{"flag": "f"}]))
+        entry = engine.run({"a": 0, "b": 2}).trace["evaluations"][0]
+        self.assertEqual(entry["result"], "skipped")
+        self.assertEqual(entry["reason"], "condition_false")
+        children = entry["condition"]["children"]
+        self.assertIs(children[0]["result"], False)
+        self.assertEqual(children[1]["type"], "unevaluated")
+
+    def test_error_nodes_keep_original_skip_reasons(self):
+        engine = make_engine()
+        engine.add_rule(Rule("missing", {"field": "ghost", "op": "==", "value": 1},
+                             [{"flag": "f"}]))
+        engine.add_rule(Rule("bad_op", {"field": "x", "op": "???", "value": 1},
+                             [{"flag": "f"}]))
+        engine.add_rule(Rule("bad_type", {"field": "name", "op": "<", "value": 5},
+                             [{"flag": "f"}]))
+        result = engine.run({"x": 1, "name": "ada"})
+        entries = {e["rule_id"]: e for e in result.trace["evaluations"]}
+        self.assertEqual(entries["missing"]["reason"], "field_missing: ghost")
+        self.assertEqual(entries["missing"]["condition"]["error_type"],
+                         "field_missing")
+        self.assertTrue(entries["bad_op"]["reason"].startswith("condition_error:"))
+        self.assertEqual(entries["bad_op"]["condition"]["error_type"],
+                         "condition_error")
+        self.assertEqual(entries["bad_type"]["condition"]["error_type"],
+                         "condition_error")
+        # evaluate_condition still raises the same exception types.
+        with self.assertRaises(FieldMissingError):
+            evaluate_condition({"field": "ghost", "op": "==", "value": 1}, {})
+        with self.assertRaises(ConditionError):
+            evaluate_condition({"field": "x", "op": "?", "value": 1}, {"x": 1})
+
+
+class TestActionCoverageAndFieldSources(unittest.TestCase):
+    def test_conflict_rejected_action_marks_overridden_by(self):
+        engine = make_engine("priority")
+        engine.add_rule(Rule("low", {"field": "x", "op": "==", "value": 1},
+                             [{"set": "v", "value": "low"}], priority=1))
+        engine.add_rule(Rule("high", {"field": "x", "op": "==", "value": 1},
+                             [{"set": "v", "value": "high"}], priority=9))
+        result = engine.run({"x": 1})
+        rejected = [a for a in result.trace["actions"]
+                    if not a.get("applied", True)]
+        self.assertEqual(rejected[0]["overridden_by"], "high")
+        self.assertEqual(result.trace["field_sources"]["v"],
+                         {"source": "high", "action_index": 0})
+
+    def test_within_rule_override_marks_superseded(self):
+        engine = make_engine()
+        engine.add_rule(Rule("r", {"field": "x", "op": "==", "value": 1},
+                             [{"set": "v", "value": "first"},
+                              {"set": "v", "value": "second"}]))
+        result = engine.run({"x": 1})
+        first, second = result.trace["actions"]
+        self.assertEqual(first["superseded_by"], "r")
+        self.assertNotIn("superseded_by", second)
+        self.assertEqual(result.trace["field_sources"]["v"]["source"], "r")
+
+    def test_field_sources_distinguish_input_and_rules(self):
+        engine = make_engine()
+        engine.add_rule(Rule("r", {"field": "x", "op": ">", "value": 0},
+                             [{"set": "y", "value": 10}, {"flag": "hit"}]))
+        result = engine.run({"x": 1, "untouched": "keep"})
+        sources = result.trace["field_sources"]
+        self.assertEqual(sources["untouched"], {"source": "input"})
+        self.assertEqual(sources["x"], {"source": "input"})
+        self.assertEqual(sources["y"]["source"], "r")
+        # Flags are not fields; they stay out of field_sources.
+        self.assertNotIn("hit", sources)
+
+    def test_conflict_basis_explains_priority_and_tie(self):
+        engine = make_engine("priority")
+        engine.add_rule(Rule("low", {"field": "x", "op": "==", "value": 1},
+                             [{"set": "v", "value": "L"}], priority=1))
+        engine.add_rule(Rule("high", {"field": "x", "op": "==", "value": 1},
+                             [{"set": "v", "value": "H"}], priority=9))
+        basis = engine.run({"x": 1}).trace["conflicts"][0]["basis"]
+        self.assertIn("priority 9 > 1", basis)
+        self.assertIn("high", basis)
+
+        tie = make_engine("priority")
+        tie.add_rule(Rule("first", {"field": "x", "op": "==", "value": 1},
+                          [{"set": "v", "value": "A"}], priority=5))
+        tie.add_rule(Rule("second", {"field": "x", "op": "==", "value": 1},
+                           [{"set": "v", "value": "B"}], priority=5))
+        basis = tie.run({"x": 1}).trace["conflicts"][0]["basis"]
+        self.assertIn("priority tie", basis)
+        self.assertIn("order 0 < 1", basis)
+
+
+class TestReplay(unittest.TestCase):
+    def _engine(self, strategy="priority"):
+        engine = make_engine(strategy)
+        engine.add_rule(Rule("adult", {"field": "age", "op": ">=", "value": 18},
+                             [{"set": "category", "value": "adult"}], priority=1))
+        engine.add_rule(Rule(
+            "vip",
+            {"and": [{"field": "tier", "op": "in", "value": ["gold"]},
+                     {"field": "active", "op": "==", "value": True}]},
+            [{"set": "discount", "value": 0.2}, {"flag": "vip"}], priority=10))
+        engine.add_rule(Rule(
+            "student", {"field": "age", "op": "<", "value": 25},
+            [{"set": "discount", "value": 0.1}], priority=5))
+        return engine
+
+    def test_replay_reproduces_same_decision(self):
+        engine = self._engine()
+        facts = {"age": 20, "tier": "gold", "active": True}
+        trace = engine.run(facts).trace
+        replayed = engine.replay(facts, trace)
+        self.assertEqual(replayed.state, trace["final_state"])
+        self.assertEqual(replayed.trace, trace)
+
+    def test_replay_detects_tampered_trace(self):
+        engine = self._engine()
+        facts = {"age": 20, "tier": "gold", "active": True}
+        trace = engine.run(facts).trace
+        tampered = json.loads(json.dumps(trace))
+        tampered["final_state"]["discount"] = 0.99
+        with self.assertRaises(ReplayMismatchError) as ctx:
+            engine.replay(facts, tampered)
+        self.assertIn("final_state", ctx.exception.diffs)
+
+    def test_replay_detects_different_input(self):
+        engine = self._engine()
+        trace = engine.run({"age": 20, "tier": "gold", "active": True}).trace
+        with self.assertRaises(ReplayMismatchError):
+            engine.replay({"age": 10, "tier": "gold", "active": True}, trace)
+
+    def test_replay_reject_strategy_uses_exception_trace(self):
+        engine = self._engine("reject")
+        facts = {"age": 20, "tier": "gold", "active": True}
+        with self.assertRaises(ConflictError) as ctx:
+            engine.run(facts)
+        # Recorded trace (from the exception) replays to the same failure.
+        self.assertIsNone(engine.replay(facts, ctx.exception.trace))
+
+    def test_trace_is_json_serializable_with_explanations(self):
+        engine = self._engine()
+        trace = engine.run({"age": 20, "tier": "gold", "active": True}).trace
+        encoded = json.dumps(trace, sort_keys=True)
+        self.assertEqual(json.loads(encoded)["field_sources"]["discount"]
+                         ["source"], "vip")
+
+    def test_format_trace_renders_explanation(self):
+        engine = self._engine()
+        trace = engine.run({"age": 20, "tier": "gold", "active": True}).trace
+        text = "\n".join(format_trace(trace))
+        self.assertIn("[matched] vip", text)
+        self.assertIn("tier in ['gold']: actual='gold' -> True", text)
+        self.assertIn("REJECTED: conflict, overridden_by vip", text)
+        self.assertIn("basis: priority 10 > 5", text)
+        self.assertIn("discount <= rule vip", text)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,9 @@
 
 ## 文件
 
-- `rule_engine.py` — 引擎库（条件 DSL、规则执行、冲突消解、执行轨迹）
-- `test_rule_engine.py` — 15 个自测（unittest）
-- `demo.py` — 完整执行轨迹样例 + 性能基准
+- `rule_engine.py` — 引擎库（条件 DSL、规则执行、冲突消解、可解释执行轨迹、重放验证）
+- `test_rule_engine.py` — 28 个自测（unittest）
+- `demo.py` — 可解释轨迹样例 + 重放验证 + 性能基准
 
 ## 运行命令
 
@@ -50,9 +50,22 @@ result.trace   # 完整执行轨迹（可 JSON 序列化）
    - `reject`：发现冲突即抛出 `ConflictError`，异常携带 `conflicts` 列表与截至失败点的完整 `trace`，冲突赋值不落盘。
 4. 同一规则内对同一字段多次赋值属于自身覆盖，后者生效，不计冲突；不同规则赋**相同**值是幂等，不计冲突。
 
-## 执行轨迹
+## 可解释执行轨迹
 
-`trace` 包含：`evaluations`（每条规则 matched/skipped 及原因：`condition_false` / `field_missing: <字段>` / `condition_error: <详情>`）、`matched`（按执行顺序的规则 id）、`actions`（每次动作的字段、旧值、新值、是否生效）、`conflicts`（消解明细）、`final_state` / `final_flags`。轨迹不含时间戳等不确定因素，同一输入多次执行逐字节一致（有测试断言）。
+`trace` 可 JSON 序列化，包含：
+
+- `evaluations`：每条规则 matched/skipped 及原因（`condition_false` / `field_missing: <字段>` / `condition_error: <详情>`），并带 `condition` **逐项求值树**——每个比较节点记录字段、操作符、期望值、实际值与结果；`and`/`or`/`not` 节点记录组合结果与每个子项；被短路的子项以 `unevaluated` 占位节点保留（`reason: short_circuit`），求值错误落在节点 `error_type`/`error` 上。
+- `matched`：按执行顺序的规则 id。
+- `actions`：每次动作的字段、旧值、新值、是否生效。被冲突拒绝的动作带 `overridden_by: <胜出规则>`；被后续赋值覆盖的已生效动作带 `superseded_by: <最终写入规则>`。
+- `conflicts`：消解明细（字段、保留方/被拒方规则与值、策略）+ `basis` 消解依据（优先级高低，或平级时声明顺序先后）。
+- `field_sources`：最终状态中每个字段的来源——`{"source": "input"}`（来自输入）或 `{"source": <规则id>, "action_index": <动作序号>}`。
+- `final_state` / `final_flags`。
+
+轨迹不含时间戳等不确定因素，同一输入多次执行逐字节一致（有测试断言）。`format_trace(trace)` 可把轨迹渲染为人类可读的逐行解释（见 `demo.py` 输出）。
+
+## 决策重放
+
+`engine.replay(facts, trace)` 用相同输入与规则集重新求值，要求逐字节复现给定轨迹（结论与解释完全一致），否则抛出 `ReplayMismatchError` 并列出分歧的顶层键。`reject` 策略下记录的是 `ConflictError.trace`，重放同样复现该失败轨迹。
 
 ## 无副作用保证
 
@@ -68,8 +81,8 @@ Python 3.12，本机实测（`python3 demo.py`，20 次取平均，含轨迹记�
 
 | 规则数 | 命中 | 动作 | 冲突 | 单次耗时 |
 |-------:|-----:|-----:|-----:|---------:|
-| 1000 | 667 | 1334 | 603 | ~1.1 ms |
-| 2000 | 1333 | 2666 | 1269 | ~2.2 ms |
-| 5000 | 3333 | 6666 | 3269 | ~6.8 ms |
+| 1000 | 667 | 1334 | 603 | ~2.0 ms |
+| 2000 | 1333 | 2666 | 1269 | ~4.5 ms |
+| 5000 | 3333 | 6666 | 3269 | ~18 ms |
 
 复杂度与规则数近似线性；上千条规则单次执行在毫秒级。
