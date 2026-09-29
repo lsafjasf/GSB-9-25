@@ -11,6 +11,11 @@ adaptive_integrate.py -- 自适应数值积分库（仅依赖 Python 标准库�
 * 端点奇性：Gauss-Kronrod 为开公式，**从不采样端点**，
   因此可积的端点奇性（如 1/sqrt(x)、log(x)）可直接积分，
   端点处函数值为 inf/nan 也没有影响（只要不被显式求值）。
+  另提供可选的端点奇性变换（endpoint_transform=True）：用 sin^2 映射
+  x = a + (b-a)*sin^2(pi*t/2) 把求值节点向端点二次压缩，端点附近的
+  代数/对数奇性被映射的 Jacobian 抵消，显著减少自适应细分。
+  变换只改变节点分布，不改变积分值；误差估计仍由 GK15 对给出，
+  报告误差仍是可验证的上界（自测逐项检查 实际误差 <= 报告误差）。
 * 无穷端点：通过变量替换支持 [a, +inf)、(-inf, b]、(-inf, +inf)。
 * 区间反序：自动交换端点并对结果取负（见 integrate 文档）。
 
@@ -173,6 +178,31 @@ def _transform(f, a: float, b: float):
     return f, a, b
 
 
+def _endpoint_map(f, a: float, b: float):
+    """
+    端点奇性变换：sin^2 映射把求值节点向端点二次压缩。
+
+        x  = a + (b-a) * sin^2(pi*t/2),   t in [0,1]
+        dx = (b-a) * (pi/2) * sin(pi*t) dt
+
+    映射满足 x(0)=a, x(1)=b，且 dx/dt 在两个端点处以 O(t) / O(1-t)
+    趋于零：x 距端点 O(s^2)（s 为到端点的 t 距离），因此 f 的
+    代数奇性 x^{-p}（p<1）与对数奇性 log(x) 乘上 Jacobian 后变为
+    端点处有界（甚至光滑）的函数，自适应细分随之大幅减少。
+
+    用 sin^2 而非 (1-cos)/2 是为了小 t 时不发生灾难性抵消。
+    返回 (g, 0.0, 1.0)，g 计 f 的求值次数（经同一计数包装）。
+    """
+    width = b - a
+    jac_scale = width * (math.pi / 2.0)
+
+    def g(t: float) -> float:
+        s = math.sin(0.5 * math.pi * t)
+        return f(a + width * s * s) * jac_scale * math.sin(math.pi * t)
+
+    return g, 0.0, 1.0
+
+
 def _integrate_finite(f, a, b, atol, rtol, max_depth, max_neval, max_intervals):
     """有限区间上的自适应积分主循环（f 已包装计数）。"""
     value0, err0 = _gk15(f, a, b)
@@ -224,7 +254,8 @@ def _integrate_finite(f, a, b, atol, rtol, max_depth, max_neval, max_intervals):
 
 def integrate(f, a: float, b: float, *, atol: float = 1e-10, rtol: float = 1e-10,
               max_depth: int = 30, max_neval: int = 100_000,
-              max_intervals: int = 10_000) -> IntegralResult:
+              max_intervals: int = 10_000,
+              endpoint_transform: bool = False) -> IntegralResult:
     """
     自适应计算 \\int_a^b f(x) dx。
 
@@ -234,6 +265,9 @@ def integrate(f, a: float, b: float, *, atol: float = 1e-10, rtol: float = 1e-10
     max_depth    : 单个子区间的最大二分深度
     max_neval    : 被积函数最大求值次数
     max_intervals: 最大子区间数
+    endpoint_transform: True 时启用端点奇性变换（sin^2 映射把求值节点
+                   向端点二次压缩，见 _endpoint_map）。只改变节点分布，
+                   不改变积分定义；误差估计仍由 GK15 对给出。
 
     语义
     ----
@@ -267,10 +301,12 @@ def integrate(f, a: float, b: float, *, atol: float = 1e-10, rtol: float = 1e-10
             raise ValueError("invalid infinite bounds")
         r1 = integrate(f, 0.0, b, atol=atol / 2, rtol=rtol,
                        max_depth=max_depth, max_neval=max_neval,
-                       max_intervals=max_intervals)
+                       max_intervals=max_intervals,
+                       endpoint_transform=endpoint_transform)
         r2 = integrate(f, a, 0.0, atol=atol / 2, rtol=rtol,
                        max_depth=max_depth, max_neval=max_neval,
-                       max_intervals=max_intervals)
+                       max_intervals=max_intervals,
+                       endpoint_transform=endpoint_transform)
         elapsed = time.perf_counter() - t0
         msgs = [m for m in (r1.message, r2.message) if m]
         return IntegralResult(
@@ -285,6 +321,8 @@ def integrate(f, a: float, b: float, *, atol: float = 1e-10, rtol: float = 1e-10
 
     try:
         g, lo, hi = _transform(counter_f, a, b)
+        if endpoint_transform:
+            g, lo, hi = _endpoint_map(g, lo, hi)
         value, err, ok, nint, _, msg = _integrate_finite(
             g, lo, hi, atol, rtol, max_depth, max_neval, max_intervals)
     except NonFiniteEvaluation as exc:

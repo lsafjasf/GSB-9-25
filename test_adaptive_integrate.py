@@ -115,6 +115,42 @@ for name, f, a, b, exact, atol, rtol in CASES:
     print(f"  {name:<30} {r.neval:>10} {n_fix_s} {ratio_s} {r.elapsed*1e3:>10.3f} {t_fix_s} {err_fix_s}")
 
 # ---------------------------------------------------------------------------
+# 5. 端点奇性变换：同一组函数、同一容差下 变换前 vs 变换后
+#    要求：两种模式下 实际误差 <= 报告误差（报告误差仍是可验证上界）；
+#    未达容差的结果必须明确报告未收敛（converged=False 打印为"未收敛"）。
+# ---------------------------------------------------------------------------
+hr("5. 端点奇性变换对拍：endpoint_transform=False vs True（同一容差 atol=rtol=1e-10）")
+
+CMP_TOL = 1e-10
+print(f"  {'函数/区间':<30} │ {'求值(前)':>8} {'求值(后)':>8} │ {'报告误差(前)':>11} {'实际误差(前)':>11} {'状态(前)':>4} │ {'报告误差(后)':>11} {'实际误差(后)':>11} {'状态(后)':>4}")
+singular_improved = []
+for name, f, a, b, exact, _atol, _rtol in CASES:
+    r0 = integrate(f, a, b, atol=CMP_TOL, rtol=CMP_TOL, endpoint_transform=False)
+    r1 = integrate(f, a, b, atol=CMP_TOL, rtol=CMP_TOL, endpoint_transform=True)
+    act0, act1 = abs(r0.value - exact), abs(r1.value - exact)
+    st0 = "收敛" if r0.converged else "未收敛"
+    st1 = "收敛" if r1.converged else "未收敛"
+    print(f"  {name:<30} │ {r0.neval:>8} {r1.neval:>8} │ {r0.error:>11.3e} {act0:>11.3e} {st0:>6} │ {r1.error:>11.3e} {act1:>11.3e} {st1:>6}")
+    tag = name.strip()
+    # 报告误差的上界性质：凡声明收敛的结果，实际误差不得超过报告误差
+    check(f"变换前 上界性质 {tag}", (not r0.converged) or act0 <= r0.error,
+          f"actual={act0:.3e} reported={r0.error:.3e} converged={r0.converged}")
+    check(f"变换后 上界性质 {tag}", (not r1.converged) or act1 <= r1.error,
+          f"actual={act1:.3e} reported={r1.error:.3e} converged={r1.converged}")
+    # 未达容差必须明确报告未收敛：库返回值 converged 标志与容差判据一致
+    tol0 = max(CMP_TOL, CMP_TOL * abs(r0.value))
+    tol1 = max(CMP_TOL, CMP_TOL * abs(r1.value))
+    check(f"变换前 未收敛如实报告 {tag}", r0.converged == (r0.error <= tol0))
+    check(f"变换后 未收敛如实报告 {tag}", r1.converged == (r1.error <= tol1))
+    if "奇性" in name or "log" in name:
+        singular_improved.append((tag, r0, r1))
+
+for tag, r0, r1 in singular_improved:
+    check(f"变换后端点奇性收敛且求值更少 {tag}",
+          r1.converged and r1.neval < r0.neval,
+          f"neval {r0.neval} -> {r1.neval}, converged {r0.converged} -> {r1.converged}")
+
+# ---------------------------------------------------------------------------
 hr("汇总")
 if FAILURES:
     print(f"  {len(FAILURES)} 项检查失败: {FAILURES}")
