@@ -42,7 +42,8 @@ log.append({"op": "transfer", "from": "alice", "to": "bob", "amount": 100})
 
 print(log.verify())                      # 全量校验 -> VerifyResult
 length, head = log.checkpoint()          # 保存可信检查点 (长度, 链头摘要)
-print(log.verify(expected_head=head))    # 提供可信链头 -> 可检出截断/整链重算
+print(log.verify(expected_head=head, expected_len=length))
+# 提供可信 (条数, 链头) -> 区分截断/整链重算与检查点之后的正常追加
 print(log.verify_from(50000))            # 从任意位置增量校验
 ```
 
@@ -55,8 +56,12 @@ print(log.verify_from(50000))            # 从任意位置增量校验
    定位到断裂处并报 content_modified。
 2. **entry_inserted**：出现序号回退/重复（外来或复制条目），或某条的后继绕过它直接链接其前驱。
 3. **entry_deleted**：出现序号跳变（期望 `i` 实际更大），或某条 `prev` 越过前驱指向再前一条。
-4. **truncated**：内部校验全部通过，但链头摘要与可信检查点 `expected_head` 不符 →
+4. **truncated**：内部校验全部通过，但现存条数少于可信检查点 `expected_len` →
    位置 = 现存长度。截断/整链删除在密码学上只能靠外部可信锚点检出，这是检查点机制的用途。
+   检查点由 `(条数, 链头)` 共同构成：条数够且检查点位置处摘要一致时，检查点之后的
+   正常追加不误报；条数够但锚定位置摘要不符，说明检查点之前的历史被重算改写，
+   报 content_modified，位置 = 检查点锚定的记录序号。只给 `expected_head` 不给
+   `expected_len` 时退化为比较最终链头，无法区分截断与正常变长。
 
 ## 追加的原子性与不可重写
 
@@ -66,8 +71,9 @@ print(log.verify_from(50000))            # 从任意位置增量校验
 - 写入后 `fsync` 落盘才应答（持久性）。
 - 追加完成后立即做 O(1) 校验：新记录的 `prev` 必须等于旧链头，且 `digest` 重算一致，
   不一致则 `assert` 失败且该条不可信（不会静默成功）。
-- 崩溃语义：若崩溃发生在一次行写入中途，最后一行残缺/非 JSON，`verify` 在该尾部位置报
-  content_modified；去掉残缺末行后链即恢复一致（未确认数据不入账）。
+- 崩溃语义：若崩溃发生在一次行写入中途，最后一行残缺/非 JSON，加载时不会抛解析异常，
+  `verify` 在该尾部位置报 content_modified（detail 含文件行号）；去掉残缺末行后链即恢复
+  一致（未确认数据不入账）。
 
 ## 增量校验
 

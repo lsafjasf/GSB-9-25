@@ -176,6 +176,59 @@ class TestChain(unittest.TestCase):
         self.assertEqual(a["content_hash"], b["content_hash"])
         self.assertEqual(a["digest"], b["digest"])
 
+    # 14. 检查点 (条数, 链头)：区分截断与检查点之后的正常变长
+    def test_checkpoint_distinguishes_growth_from_truncation(self):
+        log = AuditLog(self.path)
+        for i in range(10):
+            log.append({"i": i})
+        length, head = log.checkpoint()
+        # 检查点之后正常追加两条：不得误报截断
+        log.append({"i": 10})
+        log.append({"i": 11})
+        res = log.verify(expected_head=head, expected_len=length)
+        self.assertTrue(res.ok, res)
+        self.assertEqual(res.checked, 12)
+        # 真截断（现存 8 条 < 检查点 10 条）：报 truncated，位置 = 现存长度
+        with open(self.path, "rb") as f:
+            lines = f.readlines()
+        with open(self.path, "wb") as f:
+            f.writelines(lines[:8])
+        res2 = AuditLog(self.path).verify(expected_head=head, expected_len=length)
+        self.assertEqual(res2.error, TRUNCATED)
+        self.assertEqual(res2.position, 8)
+        # 检查点之前的历史被重算改写（条数不变）：报 content_modified，
+        # 位置 = 检查点锚定的那一条
+        recs = []
+        prev = GENESIS
+        for i in range(12):
+            r = make_record(i, prev, {"op": f"evil{i}"})
+            recs.append(r)
+            prev = bytes.fromhex(r["digest"])
+        res3 = verify_records(recs, expected_head=head, expected_len=length)
+        self.assertEqual(res3.error, CONTENT_MODIFIED)
+        self.assertEqual(res3.position, 9)
+
+    # 15. 崩溃残留的残缺末行：加载不抛异常，verify 在尾部位置报 content_modified
+    def test_torn_last_line_reports_content_modified(self):
+        log = AuditLog(self.path)
+        for i in range(5):
+            log.append({"i": i})
+        # 模拟崩溃：一次行写入只完成一半
+        with open(self.path, "ab") as f:
+            f.write(b'{"seq":5,"prev":"ab')
+        log2 = AuditLog(self.path)  # 加载不抛 JSONDecodeError
+        res = log2.verify()
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error, CONTENT_MODIFIED)
+        self.assertEqual(res.position, 5)   # 尾部位置（第 6 行，索引 5）
+        self.assertIn("第 5 行", res.detail)
+        # 按文档恢复：去掉残缺末行后链即恢复一致
+        with open(self.path, "rb") as f:
+            lines = f.readlines()
+        with open(self.path, "wb") as f:
+            f.writelines(lines[:5])
+        self.assertTrue(AuditLog(self.path).verify().ok)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -114,11 +114,17 @@ def verify_records(
     expected_head: Optional[str] = None,
     start: int = 0,
     known_prev: bytes = GENESIS,
+    expected_len: Optional[int] = None,
 ) -> VerifyResult:
     """校验 records[start:]，返回首处不一致的位置与类型。
 
-    - expected_head: 可信的链头摘要（如审计方保存的检查点）。提供时可检出
-      “链尾被截断”以及“整链被重算重写”。
+    - expected_head/expected_len: 可信检查点（AuditLog.checkpoint() 返回的
+      链头摘要与条数）。同时提供时可区分三种情况：
+        * 现存条数 < expected_len        -> truncated（链尾被截断）；
+        * 检查点位置处摘要 != expected_head -> content_modified（检查点之前的
+          历史被重算改写）；
+        * 否则（含检查点之后正常追加的条目）-> 一致。
+      只提供 expected_head 时退化为比较最终链头，无法区分截断与正常变长。
     - start/known_prev: 从任意位置增量校验。known_prev 是 records[start-1]
       的可信摘要（start=0 时为 GENESIS）。
     """
@@ -135,6 +141,12 @@ def verify_records(
 
     for i in range(start, n):
         r = records[i]
+        # 0) 加载时登记的损坏行（崩溃残留的残缺行）
+        if isinstance(r, dict) and r.get("__corrupt__"):
+            return _fail(
+                CONTENT_MODIFIED, i,
+                f"文件第 {r.get('line_no', i)} 行残缺/非 JSON"
+                f"（疑似写入中途崩溃）: {r.get('error', '')}", i)
         # 1) 字段完整性
         try:
             seq = int(r["seq"])
@@ -187,11 +199,32 @@ def verify_records(
         prev = d
 
     head = prev.hex()
-    if expected_head is not None and expected_head != head:
-        return _fail(TRUNCATED, n,
-                     f"链头 {head[:16]}… 与可信链头 "
-                     f"{expected_head[:16]}… 不符：链尾被截断或整链被重算",
-                     n, head=head)
+    if expected_head is not None:
+        if expected_len is None:
+            # 仅可信链头：链尾任何变化（含正常追加）都表现为链头不符
+            if expected_head != head:
+                return _fail(TRUNCATED, n,
+                             f"链头 {head[:16]}… 与可信链头 "
+                             f"{expected_head[:16]}… 不符：链尾被截断或整链被重算",
+                             n, head=head)
+        else:
+            # 可信 (条数, 链头)：先比条数区分截断与正常变长
+            if n < expected_len:
+                return _fail(TRUNCATED, n,
+                             f"现存 {n} 条，少于可信检查点的 {expected_len} 条："
+                             f"链尾被截断 {expected_len - n} 条", n, head=head)
+            anchor = expected_len - 1
+            if anchor == start - 1:
+                actual = known_prev.hex()
+            elif anchor >= start:
+                actual = digests[anchor].hex()
+            else:
+                actual = None  # 锚点在校验区间之前，由调用方 known_prev 担保
+            if actual is not None and actual != expected_head:
+                return _fail(CONTENT_MODIFIED, max(anchor, 0),
+                             f"第 {anchor} 条摘要与可信检查点链头 "
+                             f"{expected_head[:16]}… 不符："
+                             f"检查点之前的历史被重算改写", n, head=head)
     return VerifyResult(ok=True, checked=n - start, head=head)
 
 
@@ -205,10 +238,20 @@ class AuditLog:
         self.records: List[dict] = []
         if os.path.exists(path):
             with open(path, "rb") as f:
-                for line in f:
+                for lineno, line in enumerate(f):
                     line = line.strip()
-                    if line:
+                    if not line:
+                        continue
+                    try:
                         self.records.append(json.loads(line))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        # 崩溃残留的残缺行：加载不抛异常，登记为损坏记录，
+                        # verify 会在该位置报 content_modified（见 README 崩溃语义）
+                        self.records.append({
+                            "__corrupt__": True,
+                            "line_no": lineno,
+                            "error": str(exc),
+                        })
 
     def __len__(self) -> int:
         return len(self.records)
@@ -246,8 +289,10 @@ class AuditLog:
         return rec
 
     # -- 校验 --
-    def verify(self, expected_head: Optional[str] = None) -> VerifyResult:
-        return verify_records(self.records, expected_head=expected_head)
+    def verify(self, expected_head: Optional[str] = None,
+               expected_len: Optional[int] = None) -> VerifyResult:
+        return verify_records(self.records, expected_head=expected_head,
+                              expected_len=expected_len)
 
     def verify_from(self, start: int,
                     known_prev: Optional[bytes] = None) -> VerifyResult:
