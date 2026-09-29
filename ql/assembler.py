@@ -6,15 +6,19 @@ Output : the public ``{"ok": True, "query": ...}`` payload.
 Semantic checks (duplicate columns, constant WHERE, LIMIT range) happen here;
 structural questions are already answered by stage 2, so the assembler never
 looks at tokens or source text.
+
+``assemble_recover`` is the recovery-mode counterpart: it consumes a
+:class:`ql.cst.PartialProgram`, collects semantic problems into an error
+list instead of raising, and emits whatever fields survived.
 """
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Dict, Iterable, List, Tuple
 
 from . import cst
-from .cst import And, Cmp, Limit, Lit, Or, Program, Ref
-from .errors import duplicate_column, limit_range, where_constant
+from .cst import And, Cmp, Limit, Lit, Or, PartialProgram, Program, Ref
+from .errors import ParseError, duplicate_column, limit_range, where_constant
 
 
 def assemble(program: Program) -> dict:
@@ -39,6 +43,50 @@ def assemble(program: Program) -> dict:
         result["limit"] = limit.value
 
     return {"ok": True, "query": result}
+
+
+def assemble_recover(
+    program: PartialProgram,
+) -> Tuple[Dict[str, object], Tuple[ParseError, ...]]:
+    """Assemble a partial query dict, collecting semantic errors.
+
+    Invalid fields are dropped (a duplicate column, a constant WHERE, an
+    out-of-range LIMIT) and reported; valid fields keep the exact shape
+    strict mode would produce.
+    """
+    errors: List[ParseError] = []
+
+    select: List[str] = []
+    seen: set[str] = set()
+    for ref in program.select:
+        if ref.name in seen:
+            errors.append(duplicate_column(ref.offset, ref.name))
+            continue
+        seen.add(ref.name)
+        select.append(ref.name)
+
+    where = None
+    if program.where is not None:
+        if not _references_column(program.where):
+            errors.append(where_constant(program.where.offset))
+        else:
+            where = _emit_expr(program.where)
+
+    limit = None
+    if program.limit is not None:
+        if not 0 <= program.limit.value <= 1000:
+            errors.append(limit_range(program.limit.offset,
+                                      program.limit.value))
+        else:
+            limit = program.limit.value
+
+    query = {
+        "select": select,
+        "from": program.table.name if program.table is not None else None,
+        "where": where,
+        "limit": limit,
+    }
+    return query, tuple(errors)
 
 
 def _check_duplicate_columns(columns: Iterable[Ref]) -> None:

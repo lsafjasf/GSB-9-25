@@ -72,7 +72,7 @@ DESIGN.md                阶段契约、改动点说明、扩展性分析
 ## 运行命令
 
 ```bash
-# 全部测试（63 个：分阶段单测 + 门面 + 差分）
+# 全部测试（77 个：分阶段单测 + 门面 + 差分 + 恢复模式）
 python3 -m unittest discover -s tests -v
 
 # 只跑差分测试（46 手工 + 8000 模糊；随机种子固定，可复现）
@@ -84,7 +84,41 @@ python3 benchmark.py 2000     # 自定义轮数
 
 # 手工试用
 python3 -m ql 'SELECT a FROM t WHERE a = 1 LIMIT 5'
+python3 -m ql --recover 'SELECT a, 1, b FROM t WHERE a = @ LIMIT 5'
 ```
+
+## 错误恢复模式（strict / recover）
+
+`parse_query(source, mode=...)` 支持两种模式，默认 `mode="strict"`，
+行为与此前版本逐字节一致（差分测试守卫）。`mode="recover"` 时解析器
+跳过无法识别的片段继续向后扫描，产出**部分结果 + 错误清单**：
+
+```python
+from ql import parse_query
+out = parse_query("SELECT a, 1, b FROM t WHERE a = @ LIMIT 5", mode="recover")
+# out == {
+#   "ok": False,                       # 有错即为 False；没错时等价严格模式
+#   "query": {...},                    # 成功解析的子句，形状与严格模式相同
+#   "errors": [                        # 按源码位置排序
+#     {"code", "message", "offset", "line", "column",
+#      "expected", "actual"}, ...      # 期望/实际为结构化字段（词法错误为 null）
+#   ],
+# }
+```
+
+恢复策略：每个阶段（切词/结构/语义）各记录本阶段错误后继续——非法
+字符跳过单字符、坏字符串跳到字面量结束、结构错误跳到同步点（子句
+关键字 `FROM/WHERE/LIMIT`、逗号或 EOF）、语义错误丢弃非法字段
+（重复列只留首个、常量 WHERE 与越界 LIMIT 置空）。
+
+一致性保证（`tests/test_recovery.py` 固定种子可复跑）：
+
+- **前缀一致**：输入合法时，恢复模式结果与严格模式完全一致且错误
+  清单为空；给合法查询追加垃圾后缀，已解析字段不变。
+- **错误不丢**：严格模式报出的错误（code/offset/message）必然出现在
+  恢复模式的错误清单中（8000 条种子模糊用例验证）。
+- **定位准确**：每条错误都带 `line`/`column`（1 起），与严格模式同一
+  处换算逻辑（`ql/errorgen.py`）。
 
 ## 差分测试与耗时结果
 

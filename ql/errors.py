@@ -10,6 +10,7 @@ classification, position and wording regardless of the originating stage.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 class ErrorCode:
@@ -28,6 +29,11 @@ class ParseError(Exception):
     code: str
     offset: int
     message: str
+    # Structured expected/actual pair, filled in by factories that have it
+    # (currently only ``unexpected_token``).  Recovery mode surfaces these
+    # in its error list; strict-mode payloads are unchanged.
+    expected: Optional[str] = None
+    actual: Optional[str] = None
 
     def __str__(self) -> str:
         return f"{self.code} at offset {self.offset}: {self.message}"
@@ -56,6 +62,8 @@ def unexpected_token(offset: int, got: str, expected: str) -> ParseError:
         ErrorCode.UNEXPECTED_TOKEN,
         offset,
         f"expected {expected} but found {got}",
+        expected,
+        got,
     )
 
 

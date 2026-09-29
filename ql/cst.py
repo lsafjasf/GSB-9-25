@@ -51,3 +51,17 @@ class Program(NamedTuple):
     table: Ref
     where: Optional[Expr]
     limit: Optional[Limit]
+
+
+class PartialProgram(NamedTuple):
+    """Recovery-mode counterpart of :class:`Program`.
+
+    Clauses that failed to parse are ``None`` (or the empty tuple for
+    ``select``); successfully parsed clauses keep their full CST shape so
+    the assembler treats both program kinds uniformly.
+    """
+
+    select: tuple[Ref, ...]
+    table: Optional[Ref]
+    where: Optional[Expr]
+    limit: Optional[Limit]

@@ -6,19 +6,29 @@ Output : a :class:`ql.cst.Program` immutable syntax tree.
 The parser is a hand-written recursive-descent parser with one cursor local to
 the :class:`Parser` instance.  It never looks at source text and never builds
 the public result shape — that is stage 3's job.
+
+Two entry points share the same grammar methods:
+
+* ``parse`` (strict) raises on the first structural problem;
+* ``parse_recover`` records the problem, skips tokens up to a
+  synchronisation point (clause keyword, comma or EOF) and keeps going,
+  returning a :class:`ql.cst.PartialProgram` plus the error list.  On input
+  that strict mode accepts, recovery produces the identical program and an
+  empty error list.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from . import cst
-from .cst import And, Cmp, Lit, Limit, Or, Program, Ref
+from .cst import And, Cmp, Lit, Limit, Or, PartialProgram, Program, Ref
 from .errors import ParseError, unexpected_token, unclosed_group
 from .lexer import Token
 
 _COMPARISONS = frozenset({"=", "<>", "!=", "<", "<=", ">", ">="})
 _EXPR_END_DISPLAY = "AND, OR or end of expression"
+_CLAUSE_KEYWORDS = frozenset({"FROM", "WHERE", "LIMIT"})
 
 
 def describe(tok: Optional[Token]) -> str:
@@ -110,6 +120,132 @@ class Parser:
                 raise self._fail("LIMIT or end of query")
 
         return Program(tuple(columns), table, where, limit)
+
+    # ---- recovery mode --------------------------------------------------
+    def parse_program_recover(self) -> Tuple[PartialProgram, Tuple[ParseError, ...]]:
+        """Parse as much as possible, collecting errors instead of raising.
+
+        Each failing clause records exactly the error strict mode would
+        have raised, then the cursor skips to a synchronisation point so
+        later clauses still get parsed.
+        """
+        errors: List[ParseError] = []
+
+        took_select = self._take_keyword("SELECT")
+        if not took_select:
+            errors.append(self._fail("SELECT"))
+            self._sync(set(), _CLAUSE_KEYWORDS)
+        # Without SELECT the whole column clause is unrecognisable; the
+        # sync above already skipped it, so a second error would be noise.
+        columns = self._recover_columns(errors) if took_select else ()
+
+        table: Optional[Ref] = None
+        if not self._take_keyword("FROM"):
+            # At EOF a missing FROM only adds noise when an earlier error
+            # already flagged the truncation.
+            if self._peek() is not None or not errors:
+                errors.append(self._fail("FROM"))
+            self._sync(set(), {"WHERE", "LIMIT"})
+        else:
+            try:
+                table = self._expect_identifier("a table name")
+            except ParseError as error:
+                errors.append(error)
+                self._sync(set(), {"WHERE", "LIMIT"})
+
+        where = None
+        limit = None
+        seen_where = False
+        seen_limit = False
+        while True:
+            nxt = self._peek()
+            if nxt is None:
+                break
+            if (
+                nxt.kind == "KEYWORD"
+                and nxt.value == "WHERE"
+                and not seen_where
+                and not seen_limit
+            ):
+                self._advance()
+                seen_where = True
+                try:
+                    where = self._parse_or()
+                except ParseError as error:
+                    errors.append(error)
+                    self._sync(set(), {"LIMIT"} if not seen_limit else set())
+            elif (
+                nxt.kind == "KEYWORD"
+                and nxt.value == "LIMIT"
+                and not seen_limit
+            ):
+                self._advance()
+                seen_limit = True
+                try:
+                    limit = self._parse_limit()
+                except ParseError as error:
+                    errors.append(error)
+                    self._sync(set(), set())
+            else:
+                errors.append(self._clause_error(seen_where, seen_limit))
+                self._advance()
+                starters = set()
+                if not seen_where and not seen_limit:
+                    starters.add("WHERE")
+                if not seen_limit:
+                    starters.add("LIMIT")
+                self._sync(set(), starters)
+
+        program = PartialProgram(tuple(columns), table, where, limit)
+        return program, tuple(errors)
+
+    def _clause_error(self, seen_where: bool, seen_limit: bool) -> ParseError:
+        """The error strict mode would raise at the current clause token."""
+        tok = self._peek()
+        if tok is not None and tok.kind == "KEYWORD":
+            if tok.value == "WHERE" and seen_limit:
+                return self._fail("end of query")
+            if tok.value == "WHERE" and seen_where:
+                return self._fail("LIMIT or end of query")
+            if tok.value == "LIMIT" and seen_limit:
+                return self._fail("end of query")
+        return self._fail("LIMIT or end of query")
+
+    def _recover_columns(self, errors: List[ParseError]) -> Tuple[Ref, ...]:
+        columns: List[Ref] = []
+        try:
+            columns.append(self._expect_column())
+        except ParseError as error:
+            errors.append(error)
+            self._sync({","}, _CLAUSE_KEYWORDS)
+        while True:
+            tok = self._peek()
+            if tok is not None and tok.kind == "OP" and tok.value == ",":
+                self._advance()
+                try:
+                    columns.append(self._expect_column())
+                except ParseError as error:
+                    errors.append(error)
+                    self._sync({","}, _CLAUSE_KEYWORDS)
+                continue
+            if tok is not None and tok.kind == "IDENT":
+                errors.append(self._fail("','"))
+                self._sync({","}, _CLAUSE_KEYWORDS)
+                continue
+            break
+        return tuple(columns)
+
+    def _sync(self, ops: frozenset, keywords: frozenset) -> None:
+        """Skip tokens until a synchronisation point (or EOF)."""
+        while True:
+            tok = self._peek()
+            if tok is None:
+                return
+            if tok.kind == "KEYWORD" and tok.value in keywords:
+                return
+            if tok.kind == "OP" and tok.value in ops:
+                return
+            self._advance()
 
     def _expect_column(self) -> Ref:
         tok = self._peek()
@@ -207,3 +343,9 @@ class Parser:
 
 def parse(tokens: tuple[Token, ...], eof_offset: int) -> Program:
     return Parser(tokens, eof_offset).parse_program()
+
+
+def parse_recover(
+    tokens: tuple[Token, ...], eof_offset: int
+) -> Tuple[PartialProgram, Tuple[ParseError, ...]]:
+    return Parser(tokens, eof_offset).parse_program_recover()

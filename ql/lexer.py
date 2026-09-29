@@ -6,13 +6,21 @@ Output : a ``tuple[Token, ...]`` — immutable, no position state leaks out.
 The scanner owns a local index only; it never mutates module globals.  All
 lexical problems are raised as :class:`ql.errors.ParseError` with an offset so
 later position rendering stays in one place.
+
+Two modes share one scanner:
+
+* ``tokenize`` (strict) raises on the first problem;
+* ``tokenize_recover`` collects problems into an error list, skips the
+  offending fragment and keeps scanning, so later stages still get every
+  recognisable token.
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from .errors import (
+    ParseError,
     bad_escape,
     unclosed_string,
     unexpected_char,
@@ -40,7 +48,24 @@ class Token(NamedTuple):
 
 
 def tokenize(source: str) -> tuple[Token, ...]:
+    tokens, _ = _scan(source, None)
+    return tokens
+
+
+def tokenize_recover(
+    source: str,
+) -> tuple[tuple[Token, ...], tuple[ParseError, ...]]:
+    """Tokenise, skipping unrecognisable fragments and collecting errors."""
+    tokens, errors = _scan(source, [])
+    return tokens, tuple(errors)
+
+
+def _scan(
+    source: str, errors: Optional[List[ParseError]]
+) -> Tuple[tuple[Token, ...], Tuple[ParseError, ...]]:
+    """Shared scanner.  ``errors is None`` selects strict (raising) mode."""
     tokens: list[Token] = []
+    collected: List[ParseError] = errors if errors is not None else []
     n = len(source)
     i = 0
 
@@ -60,8 +85,9 @@ def tokenize(source: str) -> tuple[Token, ...]:
         start = i
 
         if ch == '"':
-            tok, i = _read_string(source, start)
-            tokens.append(tok)
+            tok, i = _read_string(source, start, errors)
+            if tok is not None:
+                tokens.append(tok)
             continue
 
         if ch in _DIGITS:
@@ -102,15 +128,24 @@ def tokenize(source: str) -> tuple[Token, ...]:
             i += 1
             continue
 
-        raise unexpected_char(start, ch)
+        error = unexpected_char(start, ch)
+        if errors is None:
+            raise error
+        collected.append(error)
+        i += 1
+        continue
 
-    return tuple(tokens)
+    return tuple(tokens), tuple(collected)
 
 
-def _read_string(source: str, start: int) -> tuple[Token, int]:
+def _read_string(
+    source: str, start: int, errors: Optional[List[ParseError]]
+) -> tuple[Optional[Token], int]:
     """Scan a string literal starting at ``start`` (the opening quote).
 
     Returns the token plus the index immediately after the closing quote.
+    In recovery mode a broken literal yields ``None`` (the fragment is
+    skipped) and scanning resumes at a safe point.
     """
     out: list[str] = []
     i = start + 1
@@ -118,14 +153,28 @@ def _read_string(source: str, start: int) -> tuple[Token, int]:
     while i < n and source[i] != '"':
         ch = source[i]
         if ch == "\n":
-            raise unclosed_string(start)
+            error = unclosed_string(start)
+            if errors is None:
+                raise error
+            errors.append(error)
+            return None, i  # resume at the newline
         if ch == "\\":
             if i + 1 >= n or source[i + 1] == "\n":
-                raise bad_escape(i + 1 if i + 1 < n else i, "")
+                error = bad_escape(i + 1 if i + 1 < n else i, "")
+                if errors is None:
+                    raise error
+                errors.append(error)
+                return None, i + 1  # nothing useful left in this literal
             esc = source[i + 1]
             mapping = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
             if esc not in mapping:
-                raise bad_escape(i + 1, esc)
+                error = bad_escape(i + 1, esc)
+                if errors is None:
+                    raise error
+                errors.append(error)
+                out.append(esc)  # keep the char, drop the backslash
+                i += 2
+                continue
             out.append(mapping[esc])
             i += 2
         else:
@@ -133,6 +182,10 @@ def _read_string(source: str, start: int) -> tuple[Token, int]:
             i += 1
 
     if i >= n:
-        raise unclosed_string(start)
+        error = unclosed_string(start)
+        if errors is None:
+            raise error
+        errors.append(error)
+        return None, i
 
     return Token("STRING", "".join(out), start, source[start : i + 1]), i + 1
