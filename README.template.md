@@ -26,10 +26,10 @@
 ## 运行命令
 
 ```bash
-# 分阶段单测（47 例：切词 / 结构 / 组装 / 错误 / API）
+# 分阶段单测（{{STAGES_COUNT}} 例：切词 / 结构 / 组装 / 错误 / API）
 python3 -m unittest tests.test_stages -v
 
-# 差分测试：67 条手工用例（正常 19 / 边界 18 / 畸形 30）+ 9000 条模糊用例，逐例比对重构前后
+# 差分测试：{{CORPUS_TOTAL}} 条手工用例（正常 {{CORPUS_NORMAL}} / 边界 {{CORPUS_BOUNDARY}} / 畸形 {{CORPUS_MALFORMED}}）+ {{FUZZ_TOTAL}} 条模糊用例，逐例比对重构前后
 python3 -m unittest tests.test_differential -v
 
 # 全部测试
@@ -48,23 +48,23 @@ python3 scripts/update_readme.py
 `filter_parser.parse`，用**类型严格**的深度比较（`strict_equal`，区分 `1` 与 `1.0`）
 比对完整结果，包括错误分类、错误消息与 `pos/line/col` 三个位置字段。用例三类：
 
-- 正常：优先级、结合性、括号、not、字符串转义、多行输入等（`tests/corpus.py::NORMAL`，19 条）
+- 正常：优先级、结合性、括号、not、字符串转义、多行输入等（`tests/corpus.py::NORMAL`，{{CORPUS_NORMAL}} 条）
 - 边界：空串、纯空白、无空格、深嵌套（30 层括号）、长链（50 个 and/or）、大整数、
-  Unicode 字符串等（`BOUNDARY`，18 条）
+  Unicode 字符串等（`BOUNDARY`，{{CORPUS_BOUNDARY}} 条）
 - 畸形：缺操作数/操作符/值、括号不配对、未闭合字符串、非法转义、非法数字、
-  非法字符、句尾多余 token 等（`MALFORMED`，30 条），外加 3 种模糊生成器
-  （合法表达式 / 随机 token 汤 / 合法表达式单点变异，各种子 3000 条）
+  非法字符、句尾多余 token 等（`MALFORMED`，{{CORPUS_MALFORMED}} 条），外加 {{FUZZ_GEN_COUNT}} 种模糊生成器
+  （合法表达式 / 随机 token 汤 / 合法表达式单点变异，各种子 {{FUZZ_PER_GEN}} 条）
 
-## 耗时对比（本机 Python 3.12.3，1067 条混合输入 × 30 轮取最优）
+## 耗时对比（本机 Python {{PY_VERSION}}，{{WORKLOAD_SIZE}} 条混合输入 × {{BENCH_REPEAT}} 轮取最优）
 
 | 实现 | 总耗时 | 单条均耗 | 比值 |
 |---|---|---|---|
-| legacy（单体） | ≈ 6.0 ms | ≈ 5.6 µs | 1.00 |
-| staged（重构后） | ≈ 7.1 ms | ≈ 6.6 µs | ≈ 1.19 |
+| legacy（单体） | ≈ {{LEGACY_MS}} ms | ≈ {{LEGACY_US}} µs | 1.00 |
+| staged（重构后） | ≈ {{STAGED_MS}} ms | ≈ {{STAGED_US}} µs | ≈ {{RATIO}} |
 
-重构后约慢 19%（绝对值约 1.0 µs/条），代价来自多出的中间表示（Token 与语法树节点对象），
+重构后约慢 {{SLOWDOWN_PCT}}%（绝对值约 {{DIFF_US}} µs/条），代价来自多出的中间表示（Token 与语法树节点对象），
 这正是换取可测性的部分；已通过 `Token` 改用 `NamedTuple`、节点使用 `slots` 等手段
-压低开销，当前比值 1.19，不属于显著变慢。运行 `python3 bench.py` 可复现。
+压低开销，当前比值 {{RATIO}}，不属于显著变慢。运行 `python3 bench.py` 可复现。
 
 ## 扩展时的改动点说明
 
