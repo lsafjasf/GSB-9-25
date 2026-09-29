@@ -7,12 +7,13 @@ AAD 关联绑定（防跨记录复制）、可中断/可重入的密钥轮换。
 
 ```
 MAGIC 4B | KEY_VERSION 4B | IV 16B | AAD_TAG 32B | PLAINTEXT_LEN 8B
-| CHUNK_SIZE 4B | NUM_CHUNKS 4B | [CHUNK_CT, CHUNK_TAG 32B] * NUM_CHUNKS
+| CHUNK_SIZE 4B | NUM_CHUNKS 4B | HEADER_TAG 32B | [CHUNK_CT, CHUNK_TAG 32B] * NUM_CHUNKS
 ```
 
 - 加密：HMAC-SHA256 派生的 CTR 风格密钥流（标准库无 AES 的替代构造）。
-- 完整性：每个 64 KiB 分块独立 encrypt-then-MAC，篡改可定位到分块号与字节偏移。
-- 每条记录固定开销 104 B（72 B 头 + 32 B 分块标签）。
+- 完整性：头部有独立的 HEADER_TAG，解密时先校验头部、再逐块校验密文体；
+  每个 64 KiB 分块独立 encrypt-then-MAC，篡改可定位到区域（头部/分块号）与字节偏移。
+- 每条记录固定开销 136 B（104 B 头 + 32 B 分块标签）。
 
 ## 快速开始
 
@@ -41,7 +42,7 @@ fc.reencrypt_batch(store, records, "field", aad_of=lambda r: f"user:{r['id']}".e
 | `InvalidFormatError` | MAGIC 不符，非本库密文 |
 | `TruncatedCiphertextError` | 密文被截断（`.expected` / `.actual`） |
 | `LengthMismatchError` | 实际长度与头部声明不符（含尾部多余字节） |
-| `IntegrityError` | 分块被篡改（`.chunk_index` / `.byte_offset` 指出位置） |
+| `IntegrityError` | 密文被篡改（`.region` 为 `"header"`/`"chunk"`，`.chunk_index` / `.byte_offset` 指出位置） |
 | `AssociatedDataMismatchError` | AAD 不匹配：密文被复制到别的记录 |
 
 ## 密钥管理说明

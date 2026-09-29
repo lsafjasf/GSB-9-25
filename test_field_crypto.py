@@ -58,46 +58,108 @@ class TamperTests(unittest.TestCase):
         self.plaintext = b"A" * (3 * fc.CHUNK_SIZE + 100)  # 4 个分块
         self.token = fc.encrypt(self.store, self.plaintext)
 
+    def flip(self, offset: int, mask: int = 0x01) -> bytes:
+        tampered = bytearray(self.token)
+        tampered[offset] ^= mask
+        return bytes(tampered)
+
     def test_tamper_reports_position(self):
         # 翻转第 2 个分块（索引 2）密文的第一个字节
         offset = fc.HEADER_LEN + 2 * (fc.CHUNK_SIZE + fc.TAG_LEN)
-        tampered = bytearray(self.token)
-        tampered[offset] ^= 0x01
         with self.assertRaises(fc.IntegrityError) as ctx:
-            fc.decrypt(self.store, bytes(tampered))
+            fc.decrypt(self.store, self.flip(offset))
+        self.assertEqual(ctx.exception.region, "chunk")
         self.assertEqual(ctx.exception.chunk_index, 2)
         self.assertEqual(ctx.exception.byte_offset, offset)
 
+    def test_tamper_last_chunk(self):
+        # 尾块（索引 3，不足一个完整分块）密文的最后一个字节
+        offset = len(self.token) - fc.TAG_LEN - 1
+        with self.assertRaises(fc.IntegrityError) as ctx:
+            fc.decrypt(self.store, self.flip(offset))
+        self.assertEqual(ctx.exception.region, "chunk")
+        self.assertEqual(ctx.exception.chunk_index, 3)
+        self.assertEqual(ctx.exception.byte_offset,
+                         fc.HEADER_LEN + 3 * (fc.CHUNK_SIZE + fc.TAG_LEN))
+
     def test_tamper_tag_byte(self):
         offset = fc.HEADER_LEN + fc.CHUNK_SIZE + 5  # 第 0 块的标签内
-        tampered = bytearray(self.token)
-        tampered[offset] ^= 0x80
         with self.assertRaises(fc.IntegrityError) as ctx:
-            fc.decrypt(self.store, bytes(tampered))
+            fc.decrypt(self.store, self.flip(offset, 0x80))
+        self.assertEqual(ctx.exception.region, "chunk")
         self.assertEqual(ctx.exception.chunk_index, 0)
+        self.assertEqual(ctx.exception.byte_offset, fc.HEADER_LEN)
+
+    def test_tamper_header_iv_reports_header_region(self):
+        # 翻转 IV（偏移 8..23）的一个字节：必须报在头部区域，而不是第 0 块
+        with self.assertRaises(fc.IntegrityError) as ctx:
+            fc.decrypt(self.store, self.flip(8))
+        self.assertEqual(ctx.exception.region, "header")
+        self.assertIsNone(ctx.exception.chunk_index)
+        self.assertEqual(ctx.exception.byte_offset, 0)
+
+    def test_tamper_header_aad_tag_reports_header_region(self):
+        # 翻转头部内 AAD_TAG 字段（偏移 24..55）的一个字节
+        with self.assertRaises(fc.IntegrityError) as ctx:
+            fc.decrypt(self.store, self.flip(24))
+        self.assertEqual(ctx.exception.region, "header")
+        self.assertIsNone(ctx.exception.chunk_index)
+        self.assertEqual(ctx.exception.byte_offset, 0)
 
     def test_truncation(self):
-        with self.assertRaises(fc.TruncatedCiphertextError):
+        with self.assertRaises(fc.TruncatedCiphertextError) as ctx:
             fc.decrypt(self.store, self.token[:-1])
-        with self.assertRaises(fc.TruncatedCiphertextError):
+        self.assertEqual(ctx.exception.actual, len(self.token) - 1)
+        self.assertGreater(ctx.exception.expected, ctx.exception.actual)
+        with self.assertRaises(fc.TruncatedCiphertextError) as ctx:
             fc.decrypt(self.store, self.token[:10])  # 连头部都不完整
+        self.assertEqual(ctx.exception.expected, fc.HEADER_LEN)
+        self.assertEqual(ctx.exception.actual, 10)
 
     def test_trailing_bytes_length_mismatch(self):
         with self.assertRaises(fc.LengthMismatchError):
             fc.decrypt(self.store, self.token + b"\x00")
 
     def test_header_length_field_corrupted(self):
-        # 把头部声明的明文长度改大 -> 长度与头部不符
+        # 把头部声明的明文长度改大：头部标签校验失败，必须报在头部区域
         tampered = bytearray(self.token)
         struct.pack_into(">Q", tampered, 4 + 4 + 16 + 32, len(self.plaintext) + 1)
-        with self.assertRaises((fc.LengthMismatchError, fc.TruncatedCiphertextError,
-                                fc.IntegrityError, fc.AssociatedDataMismatchError)):
+        with self.assertRaises(fc.IntegrityError) as ctx:
             fc.decrypt(self.store, bytes(tampered))
+        self.assertEqual(ctx.exception.region, "header")
+        self.assertIsNone(ctx.exception.chunk_index)
+        self.assertEqual(ctx.exception.byte_offset, 0)
 
     def test_bad_magic(self):
         tampered = b"XXXX" + self.token[4:]
         with self.assertRaises(fc.InvalidFormatError):
             fc.decrypt(self.store, tampered)
+
+
+class ShortFieldTamperTests(unittest.TestCase):
+    """字段短于一个分块时，位置信息同样必须区分头部与密文体。"""
+
+    def setUp(self):
+        self.store = make_store(1)
+        self.token = fc.encrypt(self.store, b"ssn:110101")  # 10 字节，单个分块
+
+    def test_header_tamper_located_in_header(self):
+        tampered = bytearray(self.token)
+        tampered[10] ^= 0x01  # IV 内
+        with self.assertRaises(fc.IntegrityError) as ctx:
+            fc.decrypt(self.store, bytes(tampered))
+        self.assertEqual(ctx.exception.region, "header")
+        self.assertIsNone(ctx.exception.chunk_index)
+        self.assertEqual(ctx.exception.byte_offset, 0)
+
+    def test_body_tamper_located_in_chunk_zero(self):
+        tampered = bytearray(self.token)
+        tampered[fc.HEADER_LEN + 3] ^= 0x01  # 唯一分块的密文内
+        with self.assertRaises(fc.IntegrityError) as ctx:
+            fc.decrypt(self.store, bytes(tampered))
+        self.assertEqual(ctx.exception.region, "chunk")
+        self.assertEqual(ctx.exception.chunk_index, 0)
+        self.assertEqual(ctx.exception.byte_offset, fc.HEADER_LEN)
 
 
 class AssociatedDataTests(unittest.TestCase):

@@ -5,8 +5,9 @@ field_crypto — 字段级加密库（仅依赖 Python 标准库）
 --------
 * 标准库没有 AES，因此用 HMAC-SHA256 构造 CTR 风格的密钥流做加密，
   并对每个分块做 encrypt-then-MAC（HMAC-SHA256）认证。
-* 密文自封头：MAGIC | 密钥版本 | 随机 IV | AAD 标签 | 明文长度 | 分块参数，
-  之后是若干 ``密文分块 + 分块标签``。分块 MAC 使得篡改可以定位到具体分块/字节偏移。
+* 密文自封头：MAGIC | 密钥版本 | 随机 IV | AAD 标签 | 明文长度 | 分块参数 | 头部标签，
+  之后是若干 ``密文分块 + 分块标签``。头部有独立的完整性标签，解密时先校验头部、
+  再逐块校验密文体，篡改可以定位到区域（头部/分块号）与字节偏移。
 * 关联信息（AAD，如记录主键）被纳入认证：AAD 不匹配时解密失败，
   从而发现跨记录复制密文。
 * 密钥按版本管理：旧版本密钥保留用于解密，新写入总是使用 active 版本；
@@ -21,6 +22,7 @@ field_crypto — 字段级加密库（仅依赖 Python 标准库）
     PLAINTEXT_LEN    8 字节  明文总长度
     CHUNK_SIZE       4 字节  每分块明文字节数
     NUM_CHUNKS       4 字节  分块数量（>=1，空明文也是 1 个空分块）
+    HEADER_TAG      32 字节  HMAC(mac_key, "header" || 以上 72 字节头部)
     重复 NUM_CHUNKS 次:
         CHUNK_CT     <= CHUNK_SIZE 字节
         CHUNK_TAG    32 字节  HMAC(mac_key, "chunk" || HEADER || aad || idx || CHUNK_CT)
@@ -38,8 +40,10 @@ MAGIC = b"FLE1"
 IV_LEN = 16
 TAG_LEN = 32
 CHUNK_SIZE = 64 * 1024  # 每个分块的明文字节数
-HEADER_STRUCT = struct.Struct(">4sI16s32sQII")
-HEADER_LEN = HEADER_STRUCT.size  # 72
+HEADER_BODY_STRUCT = struct.Struct(">4sI16s32sQII")
+HEADER_BODY_LEN = HEADER_BODY_STRUCT.size  # 72，头部标签之前的部分
+HEADER_STRUCT = struct.Struct(">4sI16s32sQII32s")
+HEADER_LEN = HEADER_STRUCT.size  # 104
 _STREAM_BLOCK = hashlib.sha256().digest_size  # 32 字节密钥流/块
 _BLOCKS_PER_CHUNK = CHUNK_SIZE // _STREAM_BLOCK
 
@@ -101,15 +105,26 @@ class LengthMismatchError(FieldEncryptionError):
 
 
 class IntegrityError(FieldEncryptionError):
-    """分块完整性校验失败（密文被篡改），携带篡改位置。"""
+    """完整性校验失败（密文被篡改），携带篡改区域与位置。
 
-    def __init__(self, chunk_index: int, byte_offset: int):
+    * ``region``       —— ``"header"`` 或 ``"chunk"``，指出篡改发生在哪个区域；
+    * ``chunk_index``  —— 分块号，仅 ``region == "chunk"`` 时有意义，否则为 None；
+    * ``byte_offset``  —— 被篡改区域在密文中的起始字节偏移
+      （头部为 0，分块为该分块密文的起始偏移）。
+    """
+
+    def __init__(self, region: str, chunk_index: Optional[int], byte_offset: int):
+        self.region = region
         self.chunk_index = chunk_index
         self.byte_offset = byte_offset
-        super().__init__(
-            f"integrity check failed at chunk {chunk_index} "
-            f"(ciphertext byte offset {byte_offset})"
-        )
+        if region == "header":
+            msg = f"integrity check failed in header (ciphertext byte offset {byte_offset})"
+        else:
+            msg = (
+                f"integrity check failed at chunk {chunk_index} "
+                f"(ciphertext byte offset {byte_offset})"
+            )
+        super().__init__(msg)
 
 
 class AssociatedDataMismatchError(FieldEncryptionError):
@@ -201,6 +216,11 @@ def _chunk_tag(mac_key: bytes, header: bytes, aad: bytes, index: int, ct: bytes)
     return h.digest()
 
 
+def _header_tag(mac_key: bytes, header_body: bytes) -> bytes:
+    """头部（标签之前的 72 字节）的完整性标签。"""
+    return _hmac(mac_key, b"header" + header_body)
+
+
 def _expected_length(plaintext_len: int, chunk_size: int, num_chunks: int) -> int:
     """根据头部字段计算整个 token 应有的字节数。"""
     if num_chunks < 1:
@@ -227,9 +247,10 @@ def encrypt(store: KeyStore, plaintext: bytes, aad: bytes = b"") -> bytes:
 
     num_chunks = max(1, (len(plaintext) + CHUNK_SIZE - 1) // CHUNK_SIZE)
     aad_tag = _hmac(mac_key, b"aad-tag" + aad)
-    header = HEADER_STRUCT.pack(
+    header_body = HEADER_BODY_STRUCT.pack(
         MAGIC, version, iv, aad_tag, len(plaintext), CHUNK_SIZE, num_chunks
     )
+    header = header_body + _header_tag(mac_key, header_body)
 
     out = bytearray(header)
     for i in range(num_chunks):
@@ -244,27 +265,38 @@ def encrypt(store: KeyStore, plaintext: bytes, aad: bytes = b"") -> bytes:
 def _parse_header(token: bytes):
     if len(token) < HEADER_LEN:
         raise TruncatedCiphertextError(HEADER_LEN, len(token))
-    magic, version, iv, aad_tag, pt_len, chunk_size, num_chunks = HEADER_STRUCT.unpack(
-        token[:HEADER_LEN]
-    )
+    fields = HEADER_STRUCT.unpack(token[:HEADER_LEN])
+    magic = fields[0]
     if magic != MAGIC:
         raise InvalidFormatError("bad magic: not a field_crypto token")
-    if chunk_size != CHUNK_SIZE:
-        raise LengthMismatchError(
-            f"unsupported chunk_size {chunk_size}, expected {CHUNK_SIZE}"
-        )
-    return version, iv, aad_tag, pt_len, num_chunks
+    # version, iv, aad_tag, pt_len, chunk_size, num_chunks, header_tag
+    return fields[1:]
 
 
 def peek_key_version(token: bytes) -> int:
     """不解密读取密文的密钥版本（用于判断是否需要轮换）。"""
-    version, _, _, _, _ = _parse_header(token)
+    version, _, _, _, _, _, _ = _parse_header(token)
     return version
 
 
 def decrypt(store: KeyStore, token: bytes, aad: bytes = b"") -> bytes:
     """解密并校验完整性；AAD 不匹配或密文被篡改时抛出对应错误。"""
-    version, iv, aad_tag, pt_len, num_chunks = _parse_header(token)
+    version, iv, aad_tag, pt_len, chunk_size, num_chunks, header_tag = _parse_header(token)
+
+    master = store.get(version)  # 未知版本 -> UnknownKeyVersionError
+    enc_key, mac_key = _derive_keys(master, version)
+    header = token[:HEADER_LEN]
+
+    # 先校验头部：头部任何字段（IV/AAD 标签/长度/分块参数等）被篡改都在此报出，
+    # 位置标为 header 区域，而不是错误地落到第 0 个数据分块上。
+    if not hmac.compare_digest(header_tag, _header_tag(mac_key, token[:HEADER_BODY_LEN])):
+        raise IntegrityError(region="header", chunk_index=None, byte_offset=0)
+
+    # 以下结构性检查此时只是纵深防御：头部已通过认证，正常不会触发。
+    if chunk_size != CHUNK_SIZE:
+        raise LengthMismatchError(
+            f"unsupported chunk_size {chunk_size}, expected {CHUNK_SIZE}"
+        )
     expected = _expected_length(pt_len, CHUNK_SIZE, num_chunks)
     if len(token) < expected:
         raise TruncatedCiphertextError(expected, len(token))
@@ -273,15 +305,12 @@ def decrypt(store: KeyStore, token: bytes, aad: bytes = b"") -> bytes:
             f"token has {len(token) - expected} trailing bytes beyond header-declared length"
         )
 
-    master = store.get(version)  # 未知版本 -> UnknownKeyVersionError
-    enc_key, mac_key = _derive_keys(master, version)
-    header = token[:HEADER_LEN]
-
     if not hmac.compare_digest(aad_tag, _hmac(mac_key, b"aad-tag" + aad)):
         raise AssociatedDataMismatchError(
             "associated data mismatch: token was not encrypted for this record"
         )
 
+    # 再逐块校验密文体
     out = bytearray()
     pos = HEADER_LEN
     for i in range(num_chunks):
@@ -289,7 +318,7 @@ def decrypt(store: KeyStore, token: bytes, aad: bytes = b"") -> bytes:
         ct_chunk = token[pos:pos + clen]
         tag = token[pos + clen:pos + clen + TAG_LEN]
         if not hmac.compare_digest(tag, _chunk_tag(mac_key, header, aad, i, ct_chunk)):
-            raise IntegrityError(chunk_index=i, byte_offset=pos)
+            raise IntegrityError(region="chunk", chunk_index=i, byte_offset=pos)
         stream = _keystream(enc_key, iv, i * _BLOCKS_PER_CHUNK, clen)
         out += _xor(ct_chunk, stream)
         pos += clen + TAG_LEN

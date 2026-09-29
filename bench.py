@@ -47,7 +47,7 @@ def bench(n=N):
     print(f"rotate   : {t_rot:6.2f}s  {n / t_rot:9,.0f} ops/s  "
           f"(decrypt+re-encrypt per record)")
     overhead = sum(len(t) for t in tokens[:1000]) / 1000 - payload / n
-    print(f"overhead : ~{overhead:.0f} B/record (header 72 B + one 32 B chunk tag)")
+    print(f"overhead : ~{overhead:.0f} B/record (header 104 B + one 32 B chunk tag)")
 
 
 if __name__ == "__main__":
