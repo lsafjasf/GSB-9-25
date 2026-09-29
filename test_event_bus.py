@@ -8,7 +8,7 @@ import threading
 import unittest
 import weakref
 
-from event_bus import DeliveryError, EventBus
+from event_bus import DeliveryError, EventBus, topic_matches
 
 
 class TestBasicSemantics(unittest.TestCase):
@@ -363,6 +363,196 @@ class TestConcurrency(unittest.TestCase):
         t.join()
         bus.publish("e")
         self.assertNotIn("BAD", calls)
+
+
+class TestTopicMatchingRules(unittest.TestCase):
+    """通配符匹配规则本身可断言（不依赖总线）。"""
+
+    def test_exact_pattern(self):
+        self.assertTrue(topic_matches("user.created", "user.created"))
+        self.assertFalse(topic_matches("user.created", "user.deleted"))
+        self.assertFalse(topic_matches("user.created", "user.created.x"))
+        self.assertFalse(topic_matches("user.created", "user"))
+
+    def test_single_level_wildcard(self):
+        self.assertTrue(topic_matches("user.*", "user.created"))
+        self.assertFalse(topic_matches("user.*", "user.created.admin"))  # 只匹配一层
+        self.assertFalse(topic_matches("user.*", "user"))                # 不能缺层
+        self.assertTrue(topic_matches("*.created", "user.created"))      # 前缀层也可通配
+        self.assertTrue(topic_matches("user.*.admin", "user.created.admin"))
+        self.assertFalse(topic_matches("user.*.admin", "user.created"))
+
+    def test_multi_level_wildcard(self):
+        self.assertTrue(topic_matches("user.#", "user.created"))
+        self.assertTrue(topic_matches("user.#", "user.created.admin"))
+        self.assertTrue(topic_matches("user.#", "user"))      # 匹配零层
+        self.assertFalse(topic_matches("user.#", "order.created"))
+        self.assertTrue(topic_matches("#", "anything.at.all"))
+        self.assertTrue(topic_matches("#", ""))
+
+    def test_non_string_topic_never_matches_pattern(self):
+        self.assertFalse(topic_matches("user.*", 42))
+        self.assertFalse(topic_matches("#", None))
+
+    def test_invalid_patterns_rejected_at_subscribe(self):
+        bus = EventBus()
+        for bad in ("user.#.x", "user.cr#", "user.cre*ed", "us*er", "#.#"):
+            with self.assertRaises(ValueError, msg=bad):
+                bus.subscribe(bad, lambda: None)
+        self.assertEqual(bus.subscriber_count(), 0)  # 非法模式不留残留
+
+
+class TestWildcardSubscription(unittest.TestCase):
+    def setUp(self):
+        self.bus = EventBus()
+
+    def test_prefix_wildcard_receives_matching_events(self):
+        calls = []
+        self.bus.subscribe("user.*", lambda t: calls.append(t))
+        self.bus.publish("user.created", 1)
+        self.bus.publish("user.deleted", 2)
+        self.bus.publish("order.created", 3)   # 不匹配
+        self.bus.publish("user.created.x", 4)  # 层级不符
+        self.assertEqual(calls, [1, 2])
+
+    def test_multi_level_wildcard_receives_subtree(self):
+        calls = []
+        self.bus.subscribe("user.#", lambda t: calls.append(t))
+        self.bus.publish("user.created", 1)
+        self.bus.publish("user.created.admin", 2)
+        self.bus.publish("user", 3)
+        self.bus.publish("order.created", 4)
+        self.assertEqual(calls, [1, 2, 3])
+
+    def test_delivery_order_exact_before_wildcard_then_subscription_order(self):
+        # 确定规则：先精确后通配，同层按订阅先后；与订阅交错顺序无关
+        calls = []
+        self.bus.subscribe("user.#", lambda: calls.append("wild-1"))
+        self.bus.subscribe("user.created", lambda: calls.append("exact-1"))
+        self.bus.subscribe("user.*", lambda: calls.append("wild-2"))
+        self.bus.subscribe("user.created", lambda: calls.append("exact-2"))
+        self.bus.publish("user.created")
+        self.assertEqual(calls, ["exact-1", "exact-2", "wild-1", "wild-2"])
+
+    def test_wildcard_once(self):
+        calls = []
+        self.bus.subscribe_once("user.*", lambda v: calls.append(v))
+        self.bus.publish("user.created", 1)
+        self.bus.publish("user.deleted", 2)
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.bus.subscriber_count(), 0)
+
+    def test_wildcard_once_with_filter_not_consumed_when_filtered_out(self):
+        calls = []
+        self.bus.subscribe_once("user.#", lambda v: calls.append(v),
+                                filter=lambda v: v > 0)
+        self.bus.publish("user.created", -1)  # 过滤不通过，不消耗 once
+        self.bus.publish("user.updated", 5)
+        self.bus.publish("user.deleted", 6)
+        self.assertEqual(calls, [5])
+
+    def test_wildcard_filter(self):
+        calls = []
+        self.bus.subscribe("user.*", lambda v: calls.append(v),
+                           filter=lambda v: v % 2 == 0)
+        for i in range(4):
+            self.bus.publish("user.e", i)
+        self.assertEqual(calls, [0, 2])
+
+    def test_wildcard_unsubscribe(self):
+        calls = []
+        sub = self.bus.subscribe("user.#", lambda: calls.append(1))
+        self.bus.publish("user.created")
+        sub.cancel()
+        self.bus.publish("user.created")
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.bus.subscriber_count(), 0)
+
+    def test_wildcard_weak_subscription(self):
+        calls = []
+
+        class Listener:
+            def on_event(self, v):
+                calls.append(v)
+
+        listener = Listener()
+        self.bus.subscribe_weak("user.*", listener.on_event)
+        self.bus.publish("user.created", 1)
+        self.assertEqual(calls, [1])
+        del listener
+        gc.collect()
+        self.assertEqual(self.bus.subscriber_count(), 0)
+        self.bus.publish("user.created", 2)
+        self.assertEqual(calls, [1])
+
+    def test_cancel_wildcard_during_dispatch_takes_effect_immediately(self):
+        calls = []
+        state = {}
+        def exact():
+            calls.append("exact")
+            state["wild"].cancel()
+        self.bus.subscribe("user.created", exact)
+        state["wild"] = self.bus.subscribe("user.*", lambda: calls.append("wild"))
+        self.bus.subscribe("user.#", lambda: calls.append("wild2"))
+        self.bus.publish("user.created")
+        self.assertEqual(calls, ["exact", "wild2"])  # 取消立即生效
+
+    def test_non_string_event_type_unaffected(self):
+        # 非字符串事件类型维持精确匹配语义，不参与通配
+        calls = []
+        self.bus.subscribe("#", lambda: calls.append("wild"))
+        self.bus.subscribe(42, lambda: calls.append("exact"))
+        self.bus.publish(42)
+        self.assertEqual(calls, ["exact"])
+
+    def test_subscriber_count_includes_matching_wildcards(self):
+        self.bus.subscribe("user.created", lambda: None)
+        self.bus.subscribe("user.*", lambda: None)
+        self.bus.subscribe("user.#", lambda: None)
+        self.bus.subscribe("order.#", lambda: None)
+        self.assertEqual(self.bus.subscriber_count("user.created"), 3)
+        self.assertEqual(self.bus.subscriber_count("user.created.admin"), 1)
+        self.assertEqual(self.bus.subscriber_count(), 4)
+
+
+class TestSubscriptionQuery(unittest.TestCase):
+    def setUp(self):
+        self.bus = EventBus()
+
+    def test_query_all_subscriptions(self):
+        s1 = self.bus.subscribe("user.created", lambda: None)
+        s2 = self.bus.subscribe("user.*", lambda: None)
+        s3 = self.bus.subscribe("order.#", lambda: None)
+        subs = self.bus.subscriptions()
+        self.assertEqual(subs, [s1, s2, s3])  # 先精确后通配，各自按订阅顺序
+        self.assertEqual([s.event_type for s in subs],
+                         ["user.created", "user.*", "order.#"])
+        self.assertEqual([s.wildcard for s in subs], [False, True, True])
+
+    def test_query_by_topic_reflects_delivery_order(self):
+        multi = self.bus.subscribe("user.#", lambda: None)
+        exact = self.bus.subscribe("user.created", lambda: None)
+        wild = self.bus.subscribe("user.*", lambda: None)
+        subs = self.bus.subscriptions("user.created")
+        self.assertEqual(subs, [exact, multi, wild])  # 通配层按订阅先后
+        self.assertEqual([s.event_type for s in subs],
+                         ["user.created", "user.#", "user.*"])
+
+    def test_query_excludes_cancelled(self):
+        s1 = self.bus.subscribe("user.created", lambda: None)
+        s2 = self.bus.subscribe("user.#", lambda: None)
+        s1.cancel()
+        self.assertEqual(self.bus.subscriptions(), [s2])
+        self.assertEqual(self.bus.subscriptions("user.created"), [s2])
+        s2.cancel()
+        self.assertEqual(self.bus.subscriptions(), [])
+
+    def test_clear_removes_wildcard_subscriptions(self):
+        self.bus.subscribe("user.*", lambda: None)
+        self.bus.subscribe("user.created", lambda: None)
+        self.bus.clear()
+        self.assertEqual(self.bus.subscriptions(), [])
+        self.assertEqual(self.bus.subscriber_count(), 0)
 
 
 if __name__ == "__main__":
