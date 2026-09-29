@@ -115,6 +115,17 @@ class TestRaceTimings(unittest.TestCase):
         self.assertIs(result.state(), TaskState.CANCELLED)
         self.assertEqual(runner.resources, [])  # 未获取任何资源
 
+    def test_join_unblocks_when_cancelled_before_start(self):
+        """回归：开始前取消的任务，join() 不得永久等待清理信号。"""
+        gate = threading.Event()
+        runner = TaskRunner(start_gate=gate)
+        result = runner.submit(lambda ctx: 1)
+        self.assertTrue(result.cancel())
+        gate.set()
+        # worker 提前返回的分支也必须置位清理完成信号
+        self.assertTrue(result.join(5))
+        self.assertIs(result.state(), TaskState.CANCELLED)
+
     def test_cancel_during_run(self):
         """时序 2：取消发生在执行中（RUNNING -> CANCELLED），worker 不得覆盖。"""
         entered = threading.Event()

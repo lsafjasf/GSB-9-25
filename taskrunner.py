@@ -157,20 +157,24 @@ class TaskRunner:
         result._cleanup_done.clear()
 
         def run():
-            if self._start_gate is not None:
-                self._start_gate.wait()
-            if not result._mark_running():
-                return  # 开始前已取消：不获取任何资源
-            handle = self._acquire()
             try:
-                value = fn(TaskContext(result))
-            except Exception as exc:
-                # 与取消竞争时先到先得：若取消已生效，错误被丢弃
-                result._settle(TaskState.FAILED, error=exc)
-            else:
-                result._settle(TaskState.SUCCEEDED, value=value)
+                if self._start_gate is not None:
+                    self._start_gate.wait()
+                if not result._mark_running():
+                    return  # 开始前已取消：不获取任何资源
+                handle = self._acquire()
+                try:
+                    value = fn(TaskContext(result))
+                except Exception as exc:
+                    # 与取消竞争时先到先得：若取消已生效，错误被丢弃
+                    result._settle(TaskState.FAILED, error=exc)
+                else:
+                    result._settle(TaskState.SUCCEEDED, value=value)
+                finally:
+                    handle.close()  # 成功/失败/取消三条路径统一释放
             finally:
-                handle.close()  # 成功/失败/取消三条路径统一释放
+                # 所有退出路径（含开始前取消的提前返回）都必须置位，
+                # 否则 join() 的等待方会永久阻塞
                 result._cleanup_done.set()
 
         threading.Thread(target=run, daemon=True).start()
