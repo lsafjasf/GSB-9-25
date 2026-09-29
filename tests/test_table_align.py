@@ -94,6 +94,25 @@ class FixedAlignTest(unittest.TestCase):
         self.assertEqual(fixed.display_width("a\tb"), 9)   # a + 7 空格 + b
         self.assertEqual(fixed.display_width("ab\tb"), 9)  # ab + 6 空格 + b
 
+    def test_grapheme_cluster_widths(self):
+        # 逐条断言：不可拆散序列按字素簇整体计宽
+        cases = [
+            ("👨‍👩‍👧", 2),      # ZWJ 家庭序列：整体 2，不再按分量累加为 6
+            ("👩🏽‍💻", 2),          # ZWJ + 肤色修饰符
+            ("❤️", 2),            # 变体选择符表情
+            ("✈️", 2),            # 文本符号 + VS16 -> emoji 呈现
+            ("1️⃣", 2),            # keycap 序列
+            ("🇨🇳", 2),            # 区域指示符对：一面旗，不是两个独立字符
+            ("🇺🇳", 2),            # 另一旗帜
+            (COMBINING_E, 1),       # 组合记号不额外占宽
+            ("👍🏽", 2),              # 肤色修饰符不额外占宽
+            ("中文", 4),
+            (EMOJI, 2),
+            (ZWSP_TEXT, 4),
+        ]
+        for text, expected in cases:
+            self.assertEqual(fixed.display_width(text), expected, msg=repr(text))
+
     def test_tab_policy_consistent(self):
         # 全流程一致：对齐、截断、折行都先按列位展开
         self.assertNotIn("\t", fixed.render([["a\tb", "x"]])[0])
@@ -122,6 +141,8 @@ class RegressionTest(unittest.TestCase):
             ["x", "c7"],
             ["👨‍👩‍👧", "c8"],
             ["宽char混排", "c9"],
+            ["❤️", "c10"],
+            ["🇨🇳", "c11"],
         ]
         lines = fixed.render(rows)
         starts = [col2_start(line, cell) for line, (_, cell) in zip(lines, rows)]

@@ -6,8 +6,9 @@
 - 东亚宽字符（east_asian_width 为 W/F，含绝大多数表情符号）：宽度 2；
 - 其余可打印字符：宽度 1。
 
-截断与折行按“集群”（base + 组合记号 / ZWJ 序列 / 旗帜对）推进，
-保证不可拆散序列永远不会被切成半个。
+宽度按“字素簇”整体计算：组合记号不额外占宽，ZWJ 序列、变体选择符
+表情与区域指示符对（旗帜）各按一个整体计宽（2 列）。截断与折行按
+集群推进，保证不可拆散序列永远不会被切成半个。
 """
 
 import unicodedata
@@ -67,6 +68,8 @@ def clusters(text):
 def _char_width(ch):
     if ch == "\t":
         raise ValueError("制表符必须先经 expand_tabs 展开")
+    if 0x1F3FB <= ord(ch) <= 0x1F3FF:
+        return 0  # emoji 肤色修饰符不额外占宽
     cat = unicodedata.category(ch)
     if cat in ("Mn", "Me", "Cf") or unicodedata.combining(ch):
         return 0
@@ -75,6 +78,20 @@ def _char_width(ch):
     if unicodedata.east_asian_width(ch) in ("W", "F"):
         return 2
     return 1
+
+
+def _is_variation_selector(ch):
+    return 0xFE00 <= ord(ch) <= 0xFE0F
+
+
+def _cluster_width(cluster):
+    """一个字素簇的显示宽度：不可拆散序列按整体计宽。"""
+    for ch in cluster:
+        cp = ord(ch)
+        if _is_regional(ch) or cp == _ZWJ or _is_variation_selector(ch):
+            # 旗帜（区域指示符对）、ZWJ 序列、变体选择符表情：整体 2 列
+            return 2
+    return sum(_char_width(ch) for ch in cluster)
 
 
 def expand_tabs(text, tab_stop=TAB_STOP):
@@ -93,8 +110,8 @@ def expand_tabs(text, tab_stop=TAB_STOP):
 
 
 def display_width(text):
-    """唯一的显示宽度来源：先展开制表符，再按集群内字符宽度求和。"""
-    return sum(_char_width(ch) for ch in expand_tabs(text))
+    """唯一的显示宽度来源：先展开制表符，再按字素簇求和。"""
+    return sum(_cluster_width(cluster) for cluster in clusters(expand_tabs(text)))
 
 
 def truncate(text, max_width):
@@ -103,7 +120,7 @@ def truncate(text, max_width):
     out = []
     used = 0
     for cluster in clusters(text):
-        w = display_width(cluster)
+        w = _cluster_width(cluster)
         if used + w > max_width:
             break
         out.append(cluster)
@@ -118,7 +135,7 @@ def wrap(text, max_width):
     current = []
     used = 0
     for cluster in clusters(text):
-        w = display_width(cluster)
+        w = _cluster_width(cluster)
         if used + w > max_width and current:
             lines.append("".join(current))
             current = []

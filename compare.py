@@ -15,6 +15,9 @@ DATASET = [
     ["🙂", "c4"],
     ["ab​cd", "c5"],  # 含 U+200B
     ["a\tb", "c6"],
+    ["👨‍👩‍👧", "c7"],        # ZWJ 家庭序列
+    ["❤️", "c8"],            # 变体选择符表情
+    ["🇨🇳", "c9"],            # 区域指示符对（旗帜）
 ]
 
 
@@ -39,6 +42,20 @@ sections.append("修复前: %r / %r  （组合记号被丢掉、ZWJ 序列被切
                 % (buggy.truncate("é", 1), buggy.truncate("👨‍👩‍👧", 3)))
 sections.append("修复后: %r / %r  （集群完整保留或整体舍弃）"
                 % (fixed.truncate("é", 1), fixed.truncate("👨‍👩‍👧", 3)))
+
+
+
+def old_rule_width(text):
+    """修复前的宽度规则：逐字符经 _char_width 累加（ZWJ 序列被算成 6 列）。"""
+    return sum(fixed._char_width(ch) for ch in fixed.expand_tabs(text))
+
+
+WIDTH_CASES = ["👨‍👩‍👧", "❤️", "✈️", "1️⃣", "🇨🇳", "é", "中文", "ab​cd"]
+sections.append("")
+sections.append("【宽度对照】逐字符累加（修复前） vs 字素簇整体计宽（修复后）")
+for s in WIDTH_CASES:
+    sections.append("%-12r 修复前=%d  修复后=%d"
+                    % (s, old_rule_width(s), fixed.display_width(s)))
 
 report = "\n".join(sections) + "\n"
 with open(os.path.join(os.path.dirname(__file__), "comparison_output.txt"), "w") as f:
