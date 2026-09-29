@@ -65,6 +65,23 @@ class TestParse(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_path("M 0 0 A 1 1 0 0 1 2 2")  # 圆弧不支持，明确报错
 
+    def test_command_with_no_arguments(self):
+        # 命令后面一个参数都没有（串尾）时必须明确报错，而不是静默返回空段。
+        for d in ("M", "M 0 0 L", "m 1 2 c", "M 0 0 H"):
+            with self.subTest(d=d):
+                with self.assertRaises(ValueError) as ctx:
+                    parse_path(d)
+                self.assertIn("expects", str(ctx.exception))
+
+    def test_command_with_missing_arguments(self):
+        # 命令已有部分参数但数量不足时同样必须明确报错，不能只返回一部分段。
+        for d in ("M 0", "M 0 0 L 10 0 L 10 10 L",
+                  "M 0 0 C 1 2 3", "m 1 2 l 3"):
+            with self.subTest(d=d):
+                with self.assertRaises(ValueError) as ctx:
+                    parse_path(d)
+                self.assertIn("expects", str(ctx.exception))
+
 
 class TestBBox(unittest.TestCase):
     def test_quad_exact_extremum(self):
