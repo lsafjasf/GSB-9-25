@@ -25,7 +25,11 @@ python3 bench.py 1000000             # 百万行性能基准
 
 - **占位符分类**：`<DATETIME> <URL> <IP> <UUID> <DURATION> <PATH> <VER>
   <HEX> <ID> <NUM>`，结构化模式下另有 `<VAL>`（k=v 的值）。正则按固定
-  优先级匹配，归类结果确定、与输入顺序无关。
+  优先级匹配，归类结果确定、与输入顺序无关。各模式还带"类别特异度"约束：
+  更具体的形态不得抢占更宽泛类别也能解释的文本——`<VER>` 要求显式 `v/V`
+  前缀或至少三段点分数字（`v1.2.3`、`2.10.0`），因此 `45.67`、`12.0`
+  这类普通小数归 `<NUM>` 而非 `<VER>`（见
+  `test_decimal_vs_version_in_one_line`）。
 - **可还原**：`Template` 保存字面量/占位符片段序列，
   `render(extract_values(line)) == line` 逐字符成立（测试
   `test_roundtrip_*` 对全部样例行、超长行、嵌套引号行验证）。

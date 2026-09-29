@@ -49,6 +49,13 @@ class TestExtract(unittest.TestCase):
             '3.5s': 'DURATION',
             '/opt/app/releases': 'PATH',
             'v1.2.3': 'VER',
+            'V1.2.3': 'VER',
+            '2.10.0': 'VER',
+            '10.20.30.4096': 'VER',  # 四段且末段超 3 位，IP 不匹配
+            '45.67': 'NUM',
+            '12.0': 'NUM',
+            '3.14': 'NUM',
+            '1.2': 'NUM',
             '0x7f9c4a20': 'HEX',
             'deadbeefcafe1234': 'HEX',
             'u311120': 'ID',
@@ -58,6 +65,19 @@ class TestExtract(unittest.TestCase):
         for text, name in cases.items():
             t = extract_template('x %s y' % text)
             self.assertEqual(t.text, 'x <%s> y' % name, text)
+
+    def test_decimal_vs_version_in_one_line(self):
+        # 普通小数必须归 NUM，版本号（v 前缀 / 三段以上）归 VER，
+        # 二者并列出现时不得互相抢占（回归：VER 曾吃掉所有点分小数）。
+        line = 'metric 45.67 deploy version 2.10.0 ratio 12.0 tag v1.2.3 ok'
+        t = extract_template(line)
+        self.assertEqual(
+            t.text,
+            'metric <NUM> deploy version <VER> ratio <NUM> tag <VER> ok',
+        )
+        self.assertEqual(t.placeholders, ('NUM', 'VER', 'NUM', 'VER'))
+        # 占位符分类不应破坏逐字符还原
+        self.assertEqual(t.render(t.extract_values(line)), line)
 
     def test_roundtrip_all_lines(self):
         for line in CORPUS:
