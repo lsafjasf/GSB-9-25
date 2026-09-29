@@ -43,3 +43,35 @@ python3 -m unittest tests.test_roundtrip -v     # 仅往返一致性
 python3 -m unittest tests.test_compat -v        # 仅向前兼容
 python3 -m tests.make_fixtures                  # 重新生成历史样本
 ```
+
+## 格式版本迁移工具（`src/migrate.py`）
+
+把线上旧版本（如 v0）记录批量升级到当前结构。数据目录下每个 `*.bin`
+文件视为一条记录：
+
+```sh
+python3 -m src.migrate <数据目录> --check-only   # 迁移前：读入一致性检查（不写入）
+python3 -m src.migrate <数据目录>                # 批量迁移
+python3 -m src.migrate <数据目录> --limit 100    # 分批迁移（可中断，重跑续迁）
+python3 -m src.migrate <数据目录> --only x.bin   # 失败记录修复后单独重试
+```
+
+行为约定：
+
+1. **先检查后写入**：迁移前对全部记录做严格结构校验（magic、版本号、
+   field_count 与字段项吻合、长度不越界、无尾部脏字节、可解码），失败
+   记录附原因列入报告，不进入迁移阶段。
+2. **可中断可重入**：写回采用临时文件 + 原子替换；已升级记录版本号为
+   当前版本，重跑自动跳过，`--limit` 可分批推进。
+3. **对拍**：每条记录写回前，用新代码分别解码迁移前/后的字节，业务
+   字段与未知字段必须完全一致，否则记失败且原文件不动。
+4. **报告**：输出迁移条数、跳过条数、失败条数及每条失败原因，并落盘
+   `<数据目录>/migrate_report.json`；退出码 0=无失败，1=有失败。
+
+演示（生成模拟线上存量 → 检查 → 迁移）：
+
+```sh
+python3 examples/make_online_data.py
+python3 -m src.migrate examples/online_data --check-only
+python3 -m src.migrate examples/online_data
+```
