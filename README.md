@@ -7,7 +7,7 @@
 ## 文件
 
 - `scheduler.py` — 库源码
-- `test_scheduler.py` — 22 个自测（unittest）
+- `test_scheduler.py` — 24 个自测（unittest）
 - `demo.py` — 冲突实例输出样例
 - `benchmark.py` — 规模基准（百万次展开耗时）
 
@@ -79,7 +79,7 @@
 ## 运行命令
 
 ```bash
-python3 -m unittest test_scheduler -v   # 自测（22 个用例）
+python3 -m unittest test_scheduler -v   # 自测（24 个用例）
 python3 demo.py                          # 冲突实例输出样例
 python3 benchmark.py                     # 规模基准
 ```

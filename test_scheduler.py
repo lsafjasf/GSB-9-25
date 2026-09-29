@@ -99,6 +99,19 @@ class TestConflicts(unittest.TestCase):
         self.assertEqual(cs[0].overlap_start, to_abs_minutes(D(2026, 5, 2), 60))
         self.assertEqual(cs[0].overlap_end, to_abs_minutes(D(2026, 5, 2), 120))
 
+    def test_cross_midnight_starting_day_before_range(self):
+        # 每日 22:00~26:00（跨午夜）。查询区间从 5/2 开始，但 5/1 晚开始的
+        # 实例延续到 5/2 凌晨 02:00，撞上 5/2 00:00~01:30 的单次事件。
+        # 展开候选必须覆盖区间前一天，否则跨午夜实例漏报。
+        a = Event("a", rule=RecurrenceRule("daily", D(2026, 5, 1)),
+                  windows=(W(22 * 60, 26 * 60),))
+        b = single("b", D(2026, 5, 2), 0, 90)
+        cs = find_conflicts(a, b, D(2026, 5, 2), D(2026, 5, 2))
+        self.assertEqual(len(cs), 1)
+        self.assertEqual(cs[0].a.date, D(2026, 5, 1))  # 实例锚点在前一天
+        self.assertEqual(cs[0].overlap_start, to_abs_minutes(D(2026, 5, 2), 0))
+        self.assertEqual(cs[0].overlap_end, to_abs_minutes(D(2026, 5, 2), 90))
+
     def test_recurring_vs_single(self):
         a = Event("standup", rule=RecurrenceRule("daily", D(2026, 1, 1)),
                   windows=(W(9 * 60, 9 * 60 + 30),))
@@ -150,6 +163,22 @@ class TestExceptions(unittest.TestCase):
                   exceptions={D(2026, 5, 1): MovedTo(D(2026, 5, 2))})
         b = single("b", D(2026, 5, 1), 9 * 60, 10 * 60)  # 原日期已让位
         self.assertEqual(find_conflicts(a, b, D(2026, 5, 1), D(2026, 5, 3)), [])
+
+    def test_moved_conflict_detected_when_range_starts_on_new_date(self):
+        # 规则实例原本只在 5/1，被改期到 5/2；查询区间恰好从新日期 5/2 开始。
+        # 原日期（5/1）落在查询区间外一天，候选展开必须包含它，否则改期
+        # 实例不会生成，5/2 09:30 起的冲突会被漏报。
+        a = Event("a", rule=RecurrenceRule("daily", D(2026, 5, 1), end_date=D(2026, 5, 1)),
+                  windows=(W(9 * 60, 10 * 60),),
+                  exceptions={D(2026, 5, 1): MovedTo(D(2026, 5, 2))})
+        b = single("b", D(2026, 5, 2), 9 * 60 + 30, 11 * 60)
+        cs = find_conflicts(a, b, D(2026, 5, 2), D(2026, 5, 2))
+        self.assertEqual(len(cs), 1)
+        inst = cs[0].a if cs[0].a.event_id == "a" else cs[0].b
+        self.assertEqual(inst.date, D(2026, 5, 2))
+        self.assertEqual(inst.moved_from, D(2026, 5, 1))
+        self.assertEqual(cs[0].overlap_start, to_abs_minutes(D(2026, 5, 2), 570))
+        self.assertEqual(cs[0].overlap_end, to_abs_minutes(D(2026, 5, 2), 600))
 
 
 class TestCalendar(unittest.TestCase):
