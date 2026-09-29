@@ -8,8 +8,9 @@
 ## 运行命令
 
 ```bash
-python3 -m unittest test_displaywrap -v   # 自测（53 项：字符类/折行/截断/流式一致性）
+python3 -m unittest test_displaywrap -v   # 自测（66 项：字符类/折行/截断/断行规则/流式一致性）
 python3 bench.py                          # 性能与内存基准
+python3 demo_rules.py                     # 断行规则对照演示（混排文本 × 4 种规则）
 python3 -c "from displaywrap import wrap; print(wrap('hello 世界 foo', 8))"
 ```
 
@@ -20,9 +21,10 @@ python3 -c "from displaywrap import wrap; print(wrap('hello 世界 foo', 8))"
 | `display_width(text)` | 显示宽度（制表符计 0，需先 `expand_tabs`） |
 | `clusters(text)` / `cluster_width(cl)` | 不可拆散簇切分与簇宽 |
 | `expand_tabs(text, tabsize=8)` | 按显示列位展开制表符（每逻辑行重置） |
-| `wrap(text, width, *, tab="expand", tabsize=8, atoms=())` | 一次性折行 → 行列表 |
+| `wrap(text, width, *, tab="expand", tabsize=8, atoms=(), rules="default")` | 一次性折行 → 行列表 |
 | `truncate(text, width, *, ellipsis="…", tab="expand", tabsize=8)` | 截断并追加省略标记 |
-| `Wrapper(width, ...)` | 流式折行器：`feed(chunk) -> list[str]`，`finish() -> list[str]` |
+| `Wrapper(width, ..., rules="default")` | 流式折行器：`feed(chunk) -> list[str]`，`finish() -> list[str]` |
+| `BreakRule` / `register_rule(name, rule)` / `list_rules()` | 断行规则插件：基类 / 注册 / 列出 |
 
 ## 规则
 
@@ -37,6 +39,39 @@ python3 -c "from displaywrap import wrap; print(wrap('hello 世界 foo', 8))"
   否则省略标记计入宽度，按簇截取，绝不拆簇；按单行处理（首个 `\n` 后忽略）。
 - **制表符**（显式可选）：`tab="expand"` 按显示列位展开（与折行共用同一
   宽度计算）；`tab="reject"` 抛 `ValueError`。
+- **断行规则**（`rules` 参数，按语言选择）：规则只影响断点选择，不改变
+  显示宽度计算。内置 `"default"`（历史行为）、`"cjk"`（避头尾）、
+  `"western"`（连字符断词）；可组合（如 `rules=("cjk", "western")`），
+  也可继承 `BreakRule` 后用 `register_rule` 注册自定义规则。
+
+## 断行规则插件
+
+同一段混排文本在不同规则下的断行对照（`python3 demo_rules.py`，行宽 9）：
+
+```
+[default]      [cjk]          [western]      [cjk+western]
+-------------  -------------  -------------  -------------
+他说：“排      他说：“排      他说：“排      他说：“排
+版（types      版（types      版（type-      版（type-
+etting）       etting）       setting）      setting）
+要避头尾       要避头尾，     要避头尾       要避头尾，
+，否则pun      否则punct      ，否则pu-      否则punc-
+ctuation       uation、b      nctuation      tuation、
+、bracket      rackets会      、bracke-      brackets
+s会错位。      错位。”        ts会错位       会错位。”
+”
+```
+
+- **default**：只在空格/簇边界断行，标点、括号不特殊处理（`，`、`、` 可能
+  出现在行首，`”` 可能孤立成行）。
+- **cjk（避头尾）**：闭标点（`，。、）”` 等）不出现在行首——悬挂在上一行尾
+  （允许该行轻微超宽）；开括号（`（《“` 等）不出现在行尾——整体挪到下一行。
+- **western（连字符断词）**：超宽单词在 ASCII 字母间断开并在行尾插入 `-`
+  （连字符占 1 列，不足时行尾字母为其腾位；连字符前至少保留两个字母）。
+- **组合**：`rules=("cjk", "western")` 同时生效，适合中英混排。
+
+注意：避头尾的悬挂策略意味着连续闭标点会延长当前行缓冲，内存上界相应
+变为 O(width + 最长禁拆片段 + 最长簇 + 连续悬挂标点长度)。
 
 ## 字符类用例清单（test_displaywrap.py: TestCharClasses）
 

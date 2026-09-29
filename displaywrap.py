@@ -15,6 +15,12 @@
   tab="reject" 遇到制表符抛 ValueError。展开与折行使用同一套宽度计算。
 * 截断：truncate() 追加省略标记，省略标记计入宽度；按单行处理（首个
   换行后的内容忽略）。降级规则：可用宽度小于省略标记自身宽度时返回空串 ""。
+* 断行规则插件：rules 参数按语言选择断行规则（"default" / "cjk" /
+  "western"，可组合、可用 register_rule 注册自定义规则）。规则只影响
+  断点选择，不改变显示宽度计算：
+  - "cjk"：避头尾——闭标点不出现在行首（悬挂在上一行尾，允许溢出），
+    开括号不出现在行尾（整体挪到下一行）。
+  - "western"：西文连字符断词——超宽单词在字母间断开并在行尾插入 "-"。
 * 流式：Wrapper.feed()/finish() 与一次性 wrap() 结果完全一致；
   内部缓冲为 O(width + 最长禁拆片段 + 最长簇)，与输入总量无关。
 """
@@ -29,6 +35,9 @@ __all__ = [
     "cluster_width",
     "display_width",
     "expand_tabs",
+    "BreakRule",
+    "register_rule",
+    "list_rules",
     "wrap",
     "truncate",
     "Wrapper",
@@ -137,21 +146,151 @@ def expand_tabs(text: str, tabsize: int = 8) -> str:
     return "".join(out)
 
 
-class _LineBuilder:
-    """贪心行填充机：接收 词/空格/换行 事件，产出完整行。"""
+# ---- 断行规则插件 --------------------------------------------------------
+# 规则只影响断点选择（在哪里断行、断词时是否插入连字符），
+# 不改变任何显示宽度计算（char_width / cluster_width / display_width）。
 
-    def __init__(self, width: int):
+# CJK 避头尾字符集（依据中文排版惯例）：
+# 行首禁止：闭标点、句读、语气符号等
+_CJK_NO_LINE_START = "。，、；：？！…‥‰）］｝》」』”’〉〕〗〙〛"
+# 行尾禁止：各类开括号、开引号
+_CJK_NO_LINE_END = "（［｛《「『“‘〈〔〖〘〚"
+
+
+def _is_ascii_letter(ch: str) -> bool:
+    return ("a" <= ch <= "z") or ("A" <= ch <= "Z")
+
+
+class BreakRule:
+    """断行规则插件基类。子类按需覆盖各钩子；默认行为与历史版本一致。"""
+
+    name = "default"
+    hyphen = ""  # 断词时插入行尾的连字符；空串表示不断词
+
+    def no_line_start(self, cluster: str) -> bool:
+        """该簇是否禁止出现在行首（如 CJK 闭标点）。"""
+        return False
+
+    def no_line_end(self, cluster: str) -> bool:
+        """该簇是否禁止出现在行尾（如 CJK 开括号）。"""
+        return False
+
+    def can_hyphenate(self, left: str, right: str) -> bool:
+        """是否可在 left 与 right 两个相邻簇之间插入连字符断词。"""
+        return False
+
+
+class CjkKinsokuRule(BreakRule):
+    """CJK 避头尾：闭标点不出现在行首，开括号不出现在行尾。"""
+
+    name = "cjk"
+
+    def no_line_start(self, cluster: str) -> bool:
+        return cluster[:1] in _CJK_NO_LINE_START
+
+    def no_line_end(self, cluster: str) -> bool:
+        return cluster[:1] in _CJK_NO_LINE_END
+
+
+class WesternHyphenationRule(BreakRule):
+    """西文连字符断词：超宽单词在 ASCII 字母间断开，行尾插入 "-"。"""
+
+    name = "western"
+    hyphen = "-"
+
+    def can_hyphenate(self, left: str, right: str) -> bool:
+        return (
+            bool(left) and bool(right)
+            and _is_ascii_letter(left[-1])
+            and _is_ascii_letter(right[0])
+        )
+
+
+class _CompositeRule(BreakRule):
+    """多条规则的组合：任一规则禁止即禁止，连字符取第一个非空者。"""
+
+    def __init__(self, rules):
+        self._rules = tuple(rules)
+        self.name = "+".join(r.name for r in rules)
+        self.hyphen = next((r.hyphen for r in rules if r.hyphen), "")
+
+    def no_line_start(self, cluster: str) -> bool:
+        return any(r.no_line_start(cluster) for r in self._rules)
+
+    def no_line_end(self, cluster: str) -> bool:
+        return any(r.no_line_end(cluster) for r in self._rules)
+
+    def can_hyphenate(self, left: str, right: str) -> bool:
+        return any(r.can_hyphenate(left, right) for r in self._rules)
+
+
+_RULE_REGISTRY: dict[str, BreakRule] = {}
+
+
+def register_rule(name: str, rule: BreakRule) -> None:
+    """注册自定义断行规则，之后可按名字在 rules 参数中引用。"""
+    if not name:
+        raise ValueError("规则名不能为空")
+    if not isinstance(rule, BreakRule):
+        raise TypeError("rule 必须是 BreakRule 实例")
+    _RULE_REGISTRY[name] = rule
+
+
+def list_rules() -> list[str]:
+    """返回已注册的断行规则名。"""
+    return sorted(_RULE_REGISTRY)
+
+
+def _resolve_rules(rules) -> BreakRule:
+    """把 rules 参数（名字 / 规则实例 / 两者的序列）解析为单个 BreakRule。"""
+    if rules is None:
+        rules = "default"
+    if isinstance(rules, (str, BreakRule)):
+        rules = (rules,)
+    resolved = []
+    for r in rules:
+        if isinstance(r, str):
+            try:
+                r = _RULE_REGISTRY[r]
+            except KeyError:
+                raise ValueError(
+                    f"未知断行规则: {r!r}（可用: {', '.join(list_rules())}）"
+                ) from None
+        if not isinstance(r, BreakRule):
+            raise TypeError("rules 必须是规则名或 BreakRule 实例")
+        resolved.append(r)
+    if not resolved:
+        return _RULE_REGISTRY["default"]
+    if len(resolved) == 1:
+        return resolved[0]
+    return _CompositeRule(resolved)
+
+
+register_rule("default", BreakRule())
+register_rule("cjk", CjkKinsokuRule())
+register_rule("western", WesternHyphenationRule())
+
+
+class _LineBuilder:
+    """贪心行填充机：接收 词/空格/换行 事件，产出完整行。
+
+    断点选择由 rule（BreakRule）控制；宽度计算与规则无关。
+    """
+
+    def __init__(self, width: int, rule: BreakRule | None = None):
         if width < 1:
             raise ValueError("width 必须 >= 1")
         self.width = width
-        self.parts: list[str] = []   # 当前行片段
+        self.rule = rule if rule is not None else BreakRule()
+        self._hyphen_w = display_width(self.rule.hyphen) if self.rule.hyphen else 0
+        self.parts: list[tuple[str, int]] = []  # 当前行片段 (文本, 宽度)
         self.line_w = 0              # 当前行显示宽度
         self.pend: str | None = None  # 待定空格（后跟的词放不下则丢弃）
         self.pend_w = 0
         self.lines: list[str] = []   # 已完成行
 
     def _emit(self):
-        self.lines.append("".join(self.parts))
+        self.lines.append("".join(t for t, _w in self.parts))
         self.parts = []
         self.line_w = 0
         self.pend = None
@@ -171,7 +310,7 @@ class _LineBuilder:
         if self.pend is not None:
             w = sum(u[1] for u in units)
             if self.line_w + self.pend_w + w <= self.width:
-                self.parts.append(self.pend)
+                self.parts.append((self.pend, self.pend_w))
                 self.line_w += self.pend_w
                 self.pend = None
                 self.pend_w = 0
@@ -183,12 +322,83 @@ class _LineBuilder:
         for text, w, _atomic in units:
             if self.line_w + w <= self.width or not self.parts:
                 # 行空时即使单元超宽（禁拆片段/单簇超宽）也整体放置，允许溢出
-                self.parts.append(text)
+                self.parts.append((text, w))
                 self.line_w += w
             else:
-                self._emit()
-                self.parts.append(text)
-                self.line_w = w
+                self._break_before(text, w)
+
+    def _break_before(self, text: str, w: int):
+        """当前簇放不下时的断点选择（规则钩子全部在这里生效）。"""
+        rule = self.rule
+        # 避头尾：禁止行首的簇（闭标点）悬挂在上一行尾（允许溢出）
+        if rule.no_line_start(text):
+            self.parts.append((text, w))
+            self.line_w += w
+            return
+        # 避头尾：禁止行尾的簇（开括号）整体挪到下一行
+        moved = []
+        while len(self.parts) > 1 and rule.no_line_end(self.parts[-1][0]):
+            t, tw = self.parts.pop()
+            self.line_w -= tw
+            moved.append((t, tw))
+        if moved:
+            self._drop_trailing_spaces()
+        # 西文：字母之间可插入连字符断词
+        if not moved and rule.hyphen and self._hyphenate(text, w):
+            return
+        self._emit()
+        for t, tw in reversed(moved):
+            self.parts.append((t, tw))
+            self.line_w += tw
+        if self.line_w + w <= self.width or not self.parts:
+            self.parts.append((text, w))
+            self.line_w += w
+        else:
+            self._emit()
+            self.parts.append((text, w))
+            self.line_w = w
+
+    def _drop_trailing_spaces(self):
+        # 开括号挪走后行尾可能剩下已确定的空格，断点处空白丢弃
+        while self.parts and not self.parts[-1][0].strip():
+            _t, tw = self.parts.pop()
+            self.line_w -= tw
+
+    def _hyphenate(self, text: str, w: int) -> bool:
+        """尝试在当前边界插入连字符断词；成功返回 True。"""
+        rule = self.rule
+        if not rule.can_hyphenate(self.parts[-1][0], text):
+            return False
+        # 连字符前至少保留两个字母，避免过短的行尾碎片
+        letters = 0
+        for t, _tw in reversed(self.parts):
+            if len(t) == 1 and _is_ascii_letter(t):
+                letters += 1
+            else:
+                break
+        if letters < 2:
+            return False
+        hw = self._hyphen_w
+        popped = []
+        # 连字符放不下时，把行尾字母挪到下一行为其腾位
+        while self.line_w + hw > self.width and letters > 2:
+            t, tw = self.parts.pop()
+            self.line_w -= tw
+            letters -= 1
+            popped.append((t, tw))
+        if self.line_w + hw > self.width:
+            for t, tw in reversed(popped):  # 腾不出位置：恢复并放弃断词
+                self.parts.append((t, tw))
+                self.line_w += tw
+            return False
+        self.parts.append((rule.hyphen, hw))
+        self._emit()
+        for t, tw in reversed(popped):
+            self.parts.append((t, tw))
+            self.line_w += tw
+        self.parts.append((text, w))
+        self.line_w += w
+        return True
 
     def newline(self):
         self._emit()  # 硬换行：产出当前行（可为空行），丢弃待定空格
@@ -205,13 +415,14 @@ class Wrapper:
     """
 
     def __init__(self, width: int, *, tab: str = "expand", tabsize: int = 8,
-                 atoms=()):
+                 atoms=(), rules="default"):
         if width < 1:
             raise ValueError("width 必须 >= 1")
         if tab not in ("expand", "reject"):
             raise ValueError("tab 必须是 'expand' 或 'reject'")
         if tabsize < 1:
             raise ValueError("tabsize 必须 >= 1")
+        rule = _resolve_rules(rules)
         atoms = list(atoms)
         if any(not a for a in atoms):
             raise ValueError("atoms 不能为空字符串")
@@ -221,7 +432,7 @@ class Wrapper:
         # 最长优先，保证重叠禁拆片段按最长匹配
         self._atoms = sorted(set(atoms), key=len, reverse=True)
         self._max_atom_len = max((len(a) for a in self._atoms), default=0)
-        self._b = _LineBuilder(width)
+        self._b = _LineBuilder(width, rule)
         self._buf = ""            # 未处理的原始文本尾部
         self._col = 0             # 输入逻辑行显示列位（用于 tab 展开）
         self._word_units: list[tuple[str, int, bool]] = []  # 未终止的词
@@ -336,9 +547,14 @@ class Wrapper:
 
 
 def wrap(text: str, width: int, *, tab: str = "expand", tabsize: int = 8,
-         atoms=()) -> list[str]:
-    """一次性按显示宽度折行，返回行列表（不含换行符）。空文本返回 []。"""
-    w = Wrapper(width, tab=tab, tabsize=tabsize, atoms=atoms)
+         atoms=(), rules="default") -> list[str]:
+    """一次性按显示宽度折行，返回行列表（不含换行符）。空文本返回 []。
+
+    rules 按语言选择断行规则（"default" / "cjk" / "western"，或组合如
+    ("cjk", "western")，或 register_rule 注册的自定义规则）。规则只影响
+    断点选择，不改变显示宽度计算。
+    """
+    w = Wrapper(width, tab=tab, tabsize=tabsize, atoms=atoms, rules=rules)
     lines = w.feed(text)
     lines.extend(w.finish())
     return lines
