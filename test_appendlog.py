@@ -306,3 +306,68 @@ class TestNoFalsePositives(TempLogTest):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTamperedLengthResync(TempLogTest):
+    """Length field tampered to a plausible in-bounds value.
+
+    The declared span swallows following healthy records; the reader must
+    resynchronise byte-by-byte from the corruption start and recover them.
+    """
+
+    PAYLOADS = [b"rec-%d-payload-0000" % i for i in range(5)]  # 18 bytes each
+    REC_SIZE = al.HEADER_SIZE + len(PAYLOADS[0])
+
+    def _tampered_blob(self, new_len: int) -> bytes:
+        bad = al.HEADER_STRUCT.pack(
+            al.MAGIC, new_len, zlib.crc32(self.PAYLOADS[0]) & 0xFFFFFFFF
+        ) + self.PAYLOADS[0]
+        return bad + b"".join(rec(p) for p in self.PAYLOADS[1:])
+
+    def test_records_swallowed_by_tampered_length_are_recovered(self):
+        # new_len=88: within MAX_RECORD_SIZE and within the file, and the
+        # declared span [0, 100) covers rec-1 and rec-2 entirely.
+        blob = self._tampered_blob(new_len=88)
+        assert al.HEADER_SIZE + 88 < len(blob)
+        self.write_bytes(blob)
+        result = self.scan_skip()
+        # Every healthy record after the damaged one must come back.
+        self.assertEqual(
+            [r.payload for r in result.records], self.PAYLOADS[1:]
+        )
+        # The skipped segment starts at the damaged record and ends exactly
+        # where rec-1 begins; start and length are both recorded.
+        self.assertEqual(len(result.corruptions), 1)
+        c = result.corruptions[0]
+        self.assertEqual(c.kind, al.CHECKSUM_MISMATCH)
+        self.assertEqual(c.offset, 0)
+        self.assertEqual(c.end, self.REC_SIZE)
+        self.assertEqual(c.size, self.REC_SIZE)
+
+    def test_consecutive_tampered_records_reported_separately(self):
+        # Two adjacent records with tampered lengths, then healthy records.
+        def tampered(payload, new_len):
+            crc = zlib.crc32(payload) & 0xFFFFFFFF
+            return al.HEADER_STRUCT.pack(al.MAGIC, new_len, crc) + payload
+
+        blob = (
+            tampered(b"bad-first-payload-", 60)   # declared span covers 2nd
+            + tampered(b"bad-second-payload", 40)
+            + rec(b"survivor-one")
+            + rec(b"survivor-two")
+        )
+        self.write_bytes(blob)
+        result = self.scan_skip()
+        self.assertEqual(
+            [r.payload for r in result.records],
+            [b"survivor-one", b"survivor-two"],
+        )
+        # Each damaged record is its own reported segment, not one merge.
+        self.assertEqual(len(result.corruptions), 2)
+        first, second = result.corruptions
+        self.assertEqual(first.offset, 0)
+        self.assertEqual(first.end, al.HEADER_SIZE + 18)
+        self.assertEqual(second.offset, first.end)
+        self.assertEqual(second.end, first.end + al.HEADER_SIZE + 18)
+        for c in result.corruptions:
+            self.assertEqual(c.kind, al.CHECKSUM_MISMATCH)

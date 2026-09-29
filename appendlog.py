@@ -30,9 +30,10 @@ Reader
 Two recovery modes are offered explicitly:
 
 * ``STRICT`` - raise ``CorruptionError`` at the first damaged region.
-* ``SKIP``   - log the damaged region, resynchronise on the next magic and
-  keep reading to EOF; every skipped range is recorded in
-  ``ReadResult.corruptions``.
+* ``SKIP``   - log the damaged region, resynchronise byte-by-byte from the
+  corruption start (a tampered length field is never trusted to skip over
+  healthy records) and keep reading to EOF; every skipped range is
+  recorded individually in ``ReadResult.corruptions``.
 """
 
 from __future__ import annotations
@@ -315,16 +316,68 @@ class LogReader:
                 payload = bytes(buf[pos + HEADER_SIZE : pos + HEADER_SIZE + length])
                 if (zlib.crc32(payload) & 0xFFFFFFFF) != crc:
                     end = pos + HEADER_SIZE + length
+                    # The declared length may itself be the product of
+                    # tampering, so ``end`` cannot be trusted: healthy
+                    # records may be sandwiched inside the declared span.
+                    # Resynchronise byte-by-byte from the corruption start
+                    # and recover any record that fully validates; every
+                    # skipped segment is reported individually.
+                    seg_start = pos
+                    scan = pos + 1
+                    resume = None
+                    while scan < end:
+                        idx = buf.find(MAGIC, scan, end)
+                        if idx == -1:
+                            break
+                        nested, nlen, ncrc = _parse_header(buf, idx, size)
+                        if nested is not None:
+                            scan = idx + 1  # false magic, keep scanning
+                            continue
+                        npayload = bytes(
+                            buf[idx + HEADER_SIZE : idx + HEADER_SIZE + nlen]
+                        )
+                        if (zlib.crc32(npayload) & 0xFFFFFFFF) == ncrc:
+                            # A valid record starts here: the skipped segment
+                            # ends exactly at its offset.
+                            resume = idx
+                            break
+                        # A fully framed record that fails its own checksum
+                        # is a separate damage; report it on its own and
+                        # keep resynchronising after it.
+                        corruption = Corruption(
+                            CHECKSUM_MISMATCH,
+                            seg_start,
+                            idx,
+                            f"payload CRC32 mismatch at offset {seg_start} "
+                            f"(skipped {idx - seg_start} byte(s) while "
+                            "resynchronising)",
+                        )
+                        self._handle(corruption, collected)
+                        yield None, corruption
+                        seg_start = idx
+                        scan = idx + 1
+                    if resume is None:
+                        resume = end
+                    if seg_start != pos:
+                        reason = (
+                            f"payload CRC32 mismatch at offset {seg_start} "
+                            f"(skipped {resume - seg_start} byte(s) while "
+                            "resynchronising)"
+                        )
+                    else:
+                        reason = (
+                            f"payload CRC32 mismatch (header crc=0x{crc:08x}, "
+                            f"computed over {length} byte(s) differs)"
+                        )
                     corruption = Corruption(
                         CHECKSUM_MISMATCH,
-                        pos,
-                        end,
-                        f"payload CRC32 mismatch (header crc=0x{crc:08x}, "
-                        f"computed over {length} byte(s) differs)",
+                        seg_start,
+                        resume,
+                        reason,
                     )
                     self._handle(corruption, collected)
                     yield None, corruption
-                    pos = end
+                    pos = resume
                     continue
                 yield Record(offset=pos, payload=payload), None
                 pos += HEADER_SIZE + length

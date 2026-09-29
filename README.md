@@ -50,7 +50,7 @@ with al.LogWriter("app.log") as w:
 
 | | `STRICT`（遇损即停） | `SKIP`（跳过续读） |
 |---|---|---|
-| 触发损坏时 | 抛出 `CorruptionError`（含偏移与原因） | 记录 `Corruption`，扫描下一个 magic 重新同步 |
+| 触发损坏时 | 抛出 `CorruptionError`（含偏移与原因） | 记录 `Corruption`，从损坏起点逐字节重同步（不信任被篡改的长度字段，夹在声明跨度内的正常记录会被找回） |
 | 损坏后的数据 | 不再读取 | 继续读到文件末尾 |
 | 损坏清单 | 只有第一处（异常对象上） | 全部记录在 `ReadResult.corruptions`（含跳过范围） |
 | 末尾半截 | 抛异常 | 报告后终止（尾部无可恢复内容） |
