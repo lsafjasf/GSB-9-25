@@ -41,6 +41,36 @@ class TestLongAndShortOptions(unittest.TestCase):
         r = self.p.parse(["-o=a.txt"])
         self.assertEqual(r.output, "a.txt")
 
+    def test_short_equals_empty_value(self):
+        # -o= attaches an explicit empty string; it must not swallow the
+        # following token as its value, and must not be treated as missing.
+        self.p.add_positional("src")
+        r = self.p.parse(["-o=", "pos"])
+        self.assertEqual(r.output, "")
+        self.assertEqual(r.positionals, ["pos"])
+        self.assertEqual(len(r.positionals), 1)
+        bare = make_parser()
+        self.assertEqual(bare.parse(["-o="]).output, "")
+        with self.assertRaises(ParseError):
+            bare.parse(["-o"])
+
+    def test_short_equals_value_with_positional(self):
+        # -o=a.txt takes only the inline value; the '=' is not dropped in a
+        # way that shifts positional arguments.
+        self.p.add_positional("src")
+        r = self.p.parse(["-o=a.txt", "pos"])
+        self.assertEqual(r.output, "a.txt")
+        self.assertEqual(r.positionals, ["pos"])
+        self.assertEqual(len(r.positionals), 1)
+
+    def test_short_space_empty_value_with_positional(self):
+        # -o "" is a real empty-string value supplied as its own token.
+        self.p.add_positional("src")
+        r = self.p.parse(["-o", "", "pos"])
+        self.assertEqual(r.output, "")
+        self.assertEqual(r.positionals, ["pos"])
+        self.assertEqual(len(r.positionals), 1)
+
     def test_boolean_flag(self):
         r = self.p.parse(["--verbose"])
         self.assertIs(r.verbose, True)

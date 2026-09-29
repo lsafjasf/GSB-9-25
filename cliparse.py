@@ -19,7 +19,10 @@ Parsing rules (see USAGE.md for the full spec)
    "-", a negative number (-1, -3.14), or anything after "--".
 3. Space-separated option values: the next token is consumed as the value
    unless it looks like an option (rule 2).  --opt=-value always works.
-4. "--name=" gives an empty-string value; "--name ''" likewise.
+4. "--name=" and "-o=" give an empty-string inline value (the '=' is
+   significant); "--name ''" / "-o ''" likewise.  Without the '=', a
+   value is taken from the following token, or "requires a value" if
+   there is none.
 5. Subcommand options are parsed by the subcommand's parser; a name that
    exists both globally and in the subcommand is resolved by position:
    before the subcommand token -> global, after it -> subcommand.
@@ -34,6 +37,10 @@ import sys
 __all__ = ["Option", "Parser", "ParseError", "HelpRequested", "Result"]
 
 _NEGATIVE_NUMBER_RE = re.compile(r"^-\d")
+
+# Sentinel meaning "no inline value was attached" (distinct from an
+# inline value that is the empty string, e.g. -o= or --output=).
+_NO_INLINE = object()
 
 
 class ParseError(Exception):
@@ -255,7 +262,7 @@ class Parser:
 
     def _take_value(self, tokens, i, opt, inline):
         """Return (value, next_index) for an option expecting a value."""
-        if inline is not None:
+        if inline is not _NO_INLINE:
             return inline, i
         nxt = tokens[i + 1] if i + 1 < len(tokens) else None
         if nxt is None or self._looks_like_option(nxt):
@@ -264,15 +271,16 @@ class Parser:
 
     def _parse_long(self, tokens, i, result):
         tok = tokens[i]
-        name, eq, inline = tok[2:].partition("=")
+        name, _eq, inline = tok[2:].partition("=")
         opt = self._long.get(name)
         if opt is None:
             raise self._unknown("--" + name)
         if opt.takes_value:
-            value, i = self._take_value(tokens, i, opt, inline if eq else None)
+            inline = inline if _eq else _NO_INLINE
+            value, i = self._take_value(tokens, i, opt, inline)
             self._store(result, opt, self._convert(opt, value))
         else:
-            if eq:
+            if _eq:
                 raise self._error("option %s does not take a value"
                                   % opt.display())
             self._store(result, opt)
@@ -288,8 +296,13 @@ class Parser:
             if opt.takes_value:
                 rest = cluster[j + 1:]
                 if rest.startswith("="):
-                    rest = rest[1:]
-                value, i = self._take_value(tokens, i, opt, rest or None)
+                    # An explicit '=' attaches the remainder inline, even
+                    # when it is empty: -o= gives "", whereas -o consumes
+                    # the following token as its value.
+                    inline = rest[1:]
+                else:
+                    inline = rest if rest else _NO_INLINE
+                value, i = self._take_value(tokens, i, opt, inline)
                 self._store(result, opt, self._convert(opt, value))
                 return i
             self._store(result, opt)
