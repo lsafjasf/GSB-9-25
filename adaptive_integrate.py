@@ -206,18 +206,29 @@ def integrate(
     message = "converged"
     converged = True
 
-    while total_err > max(epsabs, epsrel * abs(total)):
+    while True:
+        # 非有限值（inf/nan）会使收敛判据退化（inf > inf 为 False，
+        # 或 nan 比较恒 False），必须显式走未收敛报告路径。
+        if not (math.isfinite(total) and math.isfinite(total_err)):
+            converged = False
+            message = ("integrand returned non-finite value (inf/inf/nan) "
+                       "at a sample point; cannot certify convergence")
+            break
+        if total_err <= max(epsabs, epsrel * abs(total)):
+            break
+        if not heap:
+            converged = False
+            message = f"max_depth reached ({max_depth}); error estimate {total_err:.3g} exceeds tolerance"
+            break
         if neval + 2 * _EVALS_PER_PANEL > max_evals:
             converged = False
             message = f"max_evals reached ({max_evals}); error estimate {total_err:.3g} exceeds tolerance"
             break
         neg_err, _, sa, sb, sval, serr, depth = heapq.heappop(heap)
         if depth >= max_depth:
-            heapq.heappush(heap, (neg_err, seq, sa, sb, sval, serr, depth))
-            seq += 1
-            converged = False
-            message = f"max_depth reached ({max_depth}); error estimate {total_err:.3g} exceeds tolerance"
-            break
+            # 只冻结这个到顶的子区间（保留其 value/err 贡献，不再细分、
+            # 不再入堆），其余更浅的子区间仍可继续压低总误差。
+            continue
         mid = 0.5 * (sa + sb)
         v1, e1, n1 = _qk15(g, sa, mid)
         v2, e2, n2 = _qk15(g, mid, sb)

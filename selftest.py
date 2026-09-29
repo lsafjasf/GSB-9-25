@@ -89,6 +89,23 @@ lo, hi = r.interval
 check("未收敛区间覆盖真值", lo <= exact <= hi,
       f"interval=({lo:.6g}, {hi:.6g}), exact={exact}")
 
+# 3c. 采样点返回非有限值：必须走未收敛报告路径，
+# 不得因 inf > inf 为 False 而静默判成“已收敛”。
+r = integrate(lambda x: math.inf if x == 0.5 else 1.0, 0.0, 1.0)
+check("非有限采样值触发未收敛", not r.converged, f"msg={r.message!r}")
+check("非有限采样值不被当作收敛结果", not (r.converged and not math.isfinite(r.value)))
+
+# 3d. max_depth 只冻结到顶的子区间：尖点子区间为全堆最大误差且到顶，
+# 但冻结后其余更浅子区间继续细分仍能把总误差压进容差。
+# （旧实现会在堆顶到顶时直接 break，把整个积分判成未收敛。）
+f_3d = lambda x: math.sin(100.0 * x) + 0.1 * abs(x - 3.7) ** 0.5
+r = integrate(f_3d, 0.0, 6.0, epsabs=1e-5, epsrel=1e-5, max_depth=7)
+exact = (1.0 - math.cos(600.0)) / 100.0 + 0.1 * (3.7**1.5 + 2.3**1.5) / 1.5
+check("max_depth 冻结到顶子区间后仍收敛", r.converged,
+      f"err={r.error:.3g} neval={r.neval} nsub={r.nsub}")
+check("冻结场景实际误差不超过报告估计", abs(r.value - exact) <= r.error,
+      f"actual={abs(r.value - exact):.3e} reported={r.error:.3e}")
+
 # ---------------------------------------------------------------------------
 # 4. 与固定均匀细分方法的求值次数/耗时对比
 # ---------------------------------------------------------------------------
