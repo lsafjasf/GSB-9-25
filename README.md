@@ -6,9 +6,13 @@
 
 - `src/allocation_buggy.py` — 旧版有缺陷实现（仅用于复现，勿用于生产）
 - `src/allocation.py` — 修复版实现
+- `src/allocation_tree.py` — 多级分摊（总额 → 部门 → 人，逐级递归拆分）
 - `reproduce_issues.py` — 五类现网问题复现脚本
-- `tests/test_allocation.py` — 不变量断言 + 边界测试（14 个用例）
-- `perf_benchmark.py` — 百万份规模性能基准
+- `demo_multilevel.py` — 多级分摊业务示例（真实输出每级余数承担者）
+- `tests/test_allocation.py` — 单级不变量断言 + 边界测试（14 个用例）
+- `tests/test_allocation_tree.py` — 多级不变量 + 顺序无关测试（11 个用例）
+- `perf_benchmark.py` — 单级百万份性能基准
+- `perf_benchmark_tree.py` — 多级百万份（100 部门 × 1 万员工）性能基准
 
 ## 分配规则（最大余数法 / Hamilton 法，确定且可解释）
 
@@ -37,9 +41,47 @@
 
 ```bash
 python3 reproduce_issues.py            # 复现旧版五类问题
-python3 -m unittest discover -s tests -v   # 修复版不变量与边界测试
-python3 perf_benchmark.py 1000000      # 百万份性能基准
+python3 -m unittest discover -s tests -v   # 单级 + 多级不变量与边界测试（25 个用例）
+python3 demo_multilevel.py             # 多级分摊业务示例与校验
+python3 perf_benchmark.py 1000000      # 单级百万份性能基准
+python3 perf_benchmark_tree.py         # 多级百万份性能基准
 ```
+
+## 多级分摊（总额 → 部门 → 人）
+
+`allocate_tree(total, root)` 接收 `Node(weight, children, label)` 树，沿树逐级
+调用单级最大余数法：每个内部节点把上拨金额按子节点权重拆分，返回同构的
+`AllocatedNode` 结果树。
+
+- 每级严格相等：任一内部节点的子级金额之和 == 该节点上拨金额（逐节点成立，
+  等深树的每一层之和 == 总额），`assert_tree_invariants()` 一键校验；
+- 余数可追溯：`remainder_carriers()` 返回 `{层级: [(路径, ±1), ...]}`，
+  列出每一级哪几份承担了余数、承担了多少（每份恒为 1 个最小单位）；
+- 顺序无关：余数优先级的最终决胜键是子树指纹 `fingerprint()`
+  （权重、标签、子结构递归构成），与输入顺序无关——任意打乱输入顺序，
+  每个节点分到的金额完全不变（单级 `allocate()` 新增可选 `tie_keys`
+  参数支撑该能力，缺省行为不变）。
+
+### 多级实测输出（`python3 demo_multilevel.py`，总额 1,000,003 分）
+
+```
+第1级（和=1,000,003）: 华东部=300,001、华西部=200,001、华南区=500,001
+第2级（和=1,000,003）: 甲=75,000、乙=75,000、丙=150,001、丁=200,001、戊=0、
+                      己=125,000、庚=187,501、辛=187,500
+余数承担者：第1级 集团/华东部 +1、集团/华西部 +1；
+            第2级 集团/华东部/丙 +1、集团/华南区/庚 +1
+打乱输入顺序 100 次，每个节点金额完全一致
+```
+
+### 多级性能数据（CPython 3.12，Linux x86-64，100 部门 × 10,000 员工 = 100 万份，总额 10^12 分）
+
+| 指标 | 数值 |
+|---|---|
+| 分摊耗时 | ≈ 3.2–3.4 s（三次运行 3.37 / 3.39 / 3.25 s） |
+| 吞吐 | ≈ 29–30 万份/s |
+| 校验耗时 | ≈ 0.4 s（不变量 + 余数承担者汇总） |
+| 峰值内存 | ≈ 447 MiB |
+| 不变量校验 | 叶子层之和严格等于总额、逐节点子级之和 == 上拨金额，均通过 |
 
 ## 性能数据（CPython 3.12，Linux x86-64，n = 1,000,000，总额 10^12 分）
 

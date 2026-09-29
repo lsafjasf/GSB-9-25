@@ -39,7 +39,7 @@ class Share:
     carried_remainder: bool  # 是否承担了 1 个最小单位的余数
 
 
-def allocate(total, weights):
+def allocate(total, weights, tie_keys=None):
     """把 total（整数最小单位）按 weights 分摊，返回 list[Share]。
 
     不变量：
@@ -47,6 +47,10 @@ def allocate(total, weights):
     - weight == 0 的份 amount == 0；
     - (weight, amount) 多重集合与输入顺序无关；
     - total >= 0 时所有 amount >= 0，total <= 0 时所有 amount <= 0。
+
+    tie_keys：可选的决胜键序列（与 weights 等长），在余数优先级中取代
+    “原始下标”做稳定决胜。调用方传入与输入顺序无关的键（如子树指纹）
+    即可让分摊结果完全独立于输入顺序；缺省按下标决胜。
     """
     weights = list(weights)
     for w in weights:
@@ -67,6 +71,12 @@ def allocate(total, weights):
         if total != 0:
             raise ValueError("份数为空但总额非零，无法分摊")
         return []
+    if tie_keys is not None:
+        tie_keys = list(tie_keys)
+        if len(tie_keys) != n:
+            raise ValueError(f"tie_keys 长度 {len(tie_keys)} 与份数 {n} 不一致")
+    else:
+        tie_keys = list(range(n))
 
     if total == 0:
         return [Share(i, w, 0, False) for i, w in enumerate(weights)]
@@ -91,8 +101,8 @@ def allocate(total, weights):
 
     remainder = magnitude - sum(bases)  # 0 <= remainder < n
 
-    # 最大余数法：frac 降序 -> 权重降序 -> 下标升序，确定且可解释
-    carrier_idx = sorted(range(n), key=lambda i: (-fracs[i], -weights[i], i))
+    # 最大余数法：frac 降序 -> 权重降序 -> 决胜键升序，确定且可解释
+    carrier_idx = sorted(range(n), key=lambda i: (-fracs[i], -weights[i], tie_keys[i]))
     carried = [False] * n
     for i in carrier_idx[:remainder]:
         carried[i] = True
