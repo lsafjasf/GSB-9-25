@@ -1,0 +1,85 @@
+== scenario: clean
+reused == fresh: True
+  probe[0] reused=ping=PONG          fresh=ping=PONG         
+  probe[1] reused=tx=0               fresh=tx=0              
+  probe[2] reused=unread=0           fresh=unread=0          
+  probe[3] reused=timeout=5.0        fresh=timeout=5.0       
+  probe[4] reused=set=OK             fresh=set=OK            
+  probe[5] reused=get=v1             fresh=get=v1            
+  probe[6] reused=multi=OK           fresh=multi=OK          
+  probe[7] reused=set2=OK            fresh=set2=OK           
+  probe[8] reused=rollback=ROLLED BACK fresh=rollback=ROLLED BACK
+  probe[9] reused=get2=v2            fresh=get2=v2           
+  probe[10] reused=tx2=0              fresh=tx2=0             
+
+== scenario: timeout
+reused == fresh: True
+  probe[0] reused=ping=PONG          fresh=ping=PONG         
+  probe[1] reused=tx=0               fresh=tx=0              
+  probe[2] reused=unread=0           fresh=unread=0          
+  probe[3] reused=timeout=5.0        fresh=timeout=5.0       
+  probe[4] reused=set=OK             fresh=set=OK            
+  probe[5] reused=get=v1             fresh=get=v1            
+  probe[6] reused=multi=OK           fresh=multi=OK          
+  probe[7] reused=set2=OK            fresh=set2=OK           
+  probe[8] reused=rollback=ROLLED BACK fresh=rollback=ROLLED BACK
+  probe[9] reused=get2=v2            fresh=get2=v2           
+  probe[10] reused=tx2=0              fresh=tx2=0             
+
+== scenario: transaction
+reused == fresh: True
+  probe[0] reused=ping=PONG          fresh=ping=PONG         
+  probe[1] reused=tx=0               fresh=tx=0              
+  probe[2] reused=unread=0           fresh=unread=0          
+  probe[3] reused=timeout=5.0        fresh=timeout=5.0       
+  probe[4] reused=set=OK             fresh=set=OK            
+  probe[5] reused=get=v1             fresh=get=v1            
+  probe[6] reused=multi=OK           fresh=multi=OK          
+  probe[7] reused=set2=OK            fresh=set2=OK           
+  probe[8] reused=rollback=ROLLED BACK fresh=rollback=ROLLED BACK
+  probe[9] reused=get2=v2            fresh=get2=v2           
+  probe[10] reused=tx2=0              fresh=tx2=0             
+
+== scenario: buffer
+reused == fresh: True
+  probe[0] reused=ping=PONG          fresh=ping=PONG         
+  probe[1] reused=tx=0               fresh=tx=0              
+  probe[2] reused=unread=0           fresh=unread=0          
+  probe[3] reused=timeout=5.0        fresh=timeout=5.0       
+  probe[4] reused=set=OK             fresh=set=OK            
+  probe[5] reused=get=v1             fresh=get=v1            
+  probe[6] reused=multi=OK           fresh=multi=OK          
+  probe[7] reused=set2=OK            fresh=set2=OK           
+  probe[8] reused=rollback=ROLLED BACK fresh=rollback=ROLLED BACK
+  probe[9] reused=get2=v2            fresh=get2=v2           
+  probe[10] reused=tx2=0              fresh=tx2=0             
+
+== scenario: all(timeout+tx+buffer)
+reused == fresh: True
+  probe[0] reused=ping=PONG          fresh=ping=PONG         
+  probe[1] reused=tx=0               fresh=tx=0              
+  probe[2] reused=unread=0           fresh=unread=0          
+  probe[3] reused=timeout=5.0        fresh=timeout=5.0       
+  probe[4] reused=set=OK             fresh=set=OK            
+  probe[5] reused=get=v1             fresh=get=v1            
+  probe[6] reused=multi=OK           fresh=multi=OK          
+  probe[7] reused=set2=OK            fresh=set2=OK           
+  probe[8] reused=rollback=ROLLED BACK fresh=rollback=ROLLED BACK
+  probe[9] reused=get2=v2            fresh=get2=v2           
+  probe[10] reused=tx2=0              fresh=tx2=0             
+
+== scenario: killed
+reused == fresh: True
+  probe[0] reused=ping=PONG          fresh=ping=PONG         
+  probe[1] reused=tx=0               fresh=tx=0              
+  probe[2] reused=unread=0           fresh=unread=0          
+  probe[3] reused=timeout=5.0        fresh=timeout=5.0       
+  probe[4] reused=set=OK             fresh=set=OK            
+  probe[5] reused=get=v1             fresh=get=v1            
+  probe[6] reused=multi=OK           fresh=multi=OK          
+  probe[7] reused=set2=OK            fresh=set2=OK           
+  probe[8] reused=rollback=ROLLED BACK fresh=rollback=ROLLED BACK
+  probe[9] reused=get2=v2            fresh=get2=v2           
+  probe[10] reused=tx2=0              fresh=tx2=0             
+
+pool: created=2 destroyed=1 reset_ok=11 reset_failed=1
