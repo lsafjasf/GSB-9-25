@@ -48,3 +48,10 @@ print(r.plurals[0].explanation) # n=1.5 matches rule #0 (n is not integer) -> ot
 渲染 `inbox.summary`（含复数 + 数字 + 日期）100,000 次：
 
 - 总耗时约 0.51 s，单次约 5.1 µs，吞吐约 196,000 次/秒（模板只编译一次并缓存）。
+
+---
+
+## pool_fix/ — 连接池归还复位修复（独立交付）
+
+连接归还时残留事务/超时/缓冲等状态的缺陷复现与修复，Python 3 标准库。
+详见 `pool_fix/README.md`；运行：`cd pool_fix && python3 -m unittest test_pool_reset -v`。
